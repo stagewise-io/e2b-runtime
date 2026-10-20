@@ -1,0 +1,134 @@
+# Klex fork only: builds the patched API image and pushes it to the Klex ECR
+# repository of the selected environment. Every other image (db-migrator,
+# client-proxy, clickhouse-migrator, orchestrator, envd) is consumed unchanged
+# from upstream releases.
+#
+# Environment variables (set per GitHub environment, from infra outputs):
+#   AWS_ECR_PUBLISH_ROLE_ARN  OIDC role allowed to push to the repositories
+#   AWS_ECR_REGION            region of the repositories
+#   AWS_ECR_REPOSITORY_URLS   JSON map: component name -> repository URL
+name: Klex Publish API
+
+on:
+  push:
+    branches:
+      - klex/main
+    paths:
+      - packages/api/**
+      - packages/auth/**
+      - packages/clickhouse/**
+      - packages/db/**
+      - packages/shared/**
+      - .github/workflows/klex-publish-api.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options:
+          - preview
+          - production
+        default: preview
+
+permissions:
+  contents: read
+
+concurrency:
+  group: klex-publish-api-${{ inputs.environment || 'preview' }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish API (${{ inputs.environment || 'preview' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment || 'preview' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve build metadata
+        id: meta
+        env:
+          REPOSITORY_URLS: ${{ vars.AWS_ECR_REPOSITORY_URLS }}
+        run: |
+          set -euo pipefail
+          repository_url="$(jq -er '.api' <<<"$REPOSITORY_URLS")"
+          commit_sha="$(git rev-parse --short=12 HEAD)"
+          # Mirrors expectedMigration in packages/api/Makefile. Passing an
+          # empty value would disable the API's migration startup guard.
+          migration="$(ls packages/db/migrations | sed 's/_.*//' | sort | tail -n 1)"
+          [[ "$migration" =~ ^[0-9]{14}$ ]] || { echo "unexpected migration timestamp: $migration" >&2; exit 1; }
+          {
+            echo "repository_url=$repository_url"
+            echo "repository_name=${repository_url#*/}"
+            echo "commit_sha=$commit_sha"
+            echo "migration=$migration"
+            echo "tag=klex-$commit_sha"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@4a1596c86fd706dc0521e32f0121ad1a6d1adb74 # v6
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_ECR_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      # Repositories are immutable: re-running for an already published commit
+      # must be a no-op instead of a failed push.
+      - name: Check for existing image
+        id: existing
+        env:
+          REPOSITORY_NAME: ${{ steps.meta.outputs.repository_name }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if digest="$(aws ecr describe-images --repository-name "$REPOSITORY_NAME" --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)"; then
+            echo "exists=true" >>"$GITHUB_OUTPUT"
+            echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
+
+      - name: Build and push API image
+        id: build
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: packages
+          file: packages/api/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.repository_url }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            COMMIT_SHA=${{ steps.meta.outputs.commit_sha }}
+            EXPECTED_MIGRATION_TIMESTAMP=${{ steps.meta.outputs.migration }}
+          cache-from: type=gha,scope=klex-api
+          cache-to: type=gha,mode=max,scope=klex-api
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.meta.outputs.repository_url }}:${{ steps.meta.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.existing.outputs.digest }}
+          REUSED: ${{ steps.existing.outputs.exists }}
+          MIGRATION: ${{ steps.meta.outputs.migration }}
+        run: |
+          {
+            echo "### API image"
+            echo ""
+            echo "- Image: \`$IMAGE\`"
+            echo "- Digest: \`$DIGEST\`"
+            echo "- Expected migration: \`$MIGRATION\`"
+            echo "- Reused existing image: \`$REUSED\`"
+          } >>"$GITHUB_STEP_SUMMARY"
