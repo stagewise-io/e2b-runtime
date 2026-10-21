@@ -121,11 +121,12 @@ func placementAPIError(err error) *api.APIError {
 	}
 
 	var (
-		timeoutErr     placement.PlacementTimeoutError
-		noNodesErr     placement.NoNodesAvailableError
-		noEligibleErr  placement.FailedToPlaceSandboxError
-		unsupportedErr placement.UnsupportedFeatureError
-		createErr      placement.SandboxCreateError
+		timeoutErr              placement.PlacementTimeoutError
+		noNodesErr              placement.NoNodesAvailableError
+		noEligibleErr           placement.FailedToPlaceSandboxError
+		unsupportedErr          placement.UnsupportedFeatureError
+		unsupportedAdmissionErr placement.UnsupportedResourceAdmissionError
+		createErr               placement.SandboxCreateError
 	)
 
 	switch {
@@ -143,6 +144,8 @@ func placementAPIError(err error) *api.APIError {
 		result.Retryable = apierrors.CanRetry
 
 		return result
+	case errors.As(err, &unsupportedAdmissionErr):
+		return apiErr(http.StatusServiceUnavailable, errCodeFeatureUnsupported, placementMessagePrefix+": no orchestrator supports enforced CPU and disk admission")
 	case errors.As(err, &unsupportedErr):
 		// Same status as the sibling refusals; the error code carries the
 		// distinction, and the message offers no retry because none helps.

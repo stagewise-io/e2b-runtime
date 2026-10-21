@@ -42,6 +42,7 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	sbxlogger "github.com/e2b-dev/infra/packages/shared/pkg/logger/sandbox"
+	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
 	"github.com/e2b-dev/infra/packages/shared/pkg/retry"
 	"github.com/e2b-dev/infra/packages/shared/pkg/sandboxtypes"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
@@ -180,6 +181,7 @@ func firecrackerSupports(ctx context.Context, sbx *sandbox.Sandbox, feature stri
 }
 
 func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequest) (_ *orchestrator.SandboxCreateResponse, createErr error) {
+	defer func() { createErr = resourceAdmissionStatus(createErr) }()
 	releaseWork := s.info.TrackWork()
 	defer releaseWork()
 
@@ -302,6 +304,19 @@ func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequ
 		}
 	}
 	defer s.startingSandboxes.Release(1)
+
+	if s.sandboxFactory.Admission.Enabled() {
+		resources, err := resourceadmission.FromMiB(vcpu, req.GetSandbox().GetTotalDiskSizeMb())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "invalid sandbox resource quantities")
+		}
+		lease, err := s.sandboxFactory.Admission.Acquire(resources)
+		if err != nil {
+			return nil, resourceAdmissionStatus(err)
+		}
+		defer lease.ReleaseUnclaimed()
+		ctx = sandbox.WithResourceLease(ctx, lease)
+	}
 
 	// Pinned: eviction Closes a template, which deletes its snapfile/metafile
 	// from disk, so a template backing a running sandbox must not be evictable.
@@ -1238,6 +1253,7 @@ func (s *Server) Pause(ctx context.Context, in *orchestrator.SandboxPauseRequest
 	// Fire and forget - upload completes in the background
 	res, err := s.snapshotAndCacheSandbox(ctx, sbx, in.GetBuildId(), map[string]string{storage.ObjectMetadataTemplateID: in.GetTemplateId()}, storage.ObjectOriginPause, in.GetFilesystemOnly(), deferRootfsExport, false)
 	if err != nil {
+		diskReservation.Failed(err)
 		telemetry.ReportCriticalError(ctx, "error snapshotting sandbox", err, telemetry.WithSandboxID(in.GetSandboxId()))
 
 		return nil, status.Errorf(codes.Internal, "error snapshotting sandbox '%s': %s", in.GetSandboxId(), err)
@@ -1245,11 +1261,12 @@ func (s *Server) Pause(ctx context.Context, in *orchestrator.SandboxPauseRequest
 
 	// The disk reservation follows the capture from here: most of it goes
 	// once the diffs are on disk, the upload's copy once the upload ends.
-	s.releasePauseDiskWhenWritten(context.WithoutCancel(ctx), res, diskReservation)
-	completeUpload := res.completeUpload
-	res.completeUpload = func(ctx context.Context, err error) {
-		completeUpload(ctx, err)
-		diskReservation.Release()
+	if diskReservation != nil && diskReservation.writes != nil {
+		s.bindSnapshotWrites(context.WithoutCancel(ctx), res, diskReservation)
+	} else {
+		s.releasePauseDiskWhenWritten(context.WithoutCancel(ctx), res, diskReservation)
+		completeUpload := res.completeUpload
+		res.completeUpload = func(ctx context.Context, err error) { completeUpload(ctx, err); diskReservation.Release() }
 	}
 	diskHandedOff = true
 
@@ -1676,6 +1693,16 @@ func (s *Server) checkpointInPlace(ctx context.Context, sbx *sandbox.Sandbox, in
 		return nil, false, status.Errorf(codes.FailedPrecondition, "a checkpoint is already in progress for sandbox '%s'", in.GetSandboxId())
 	}
 	defer sbx.EndCheckpoint()
+	diskReservation, err := s.admitCheckpointDisk(ctx, sbx, in.GetFilesystemOnly())
+	if err != nil {
+		return nil, false, err
+	}
+	diskHandedOff := false
+	defer func() {
+		if !diskHandedOff {
+			diskReservation.Release()
+		}
+	}()
 
 	// Gate the rootfs seal deferral on the existing defer-rootfs-export flag: when
 	// on, the rootfs is swapped to a fresh COW cache and sealed (reflinked) in the
@@ -1693,6 +1720,7 @@ func (s *Server) checkpointInPlace(ctx context.Context, sbx *sandbox.Sandbox, in
 		true, // maintainSandbox: resume in place
 	)
 	if err != nil {
+		diskReservation.Failed(err)
 		telemetry.ReportCriticalError(ctx, "error snapshotting sandbox for checkpoint", err, telemetry.WithSandboxID(in.GetSandboxId()))
 
 		// The one path where the orchestrator itself destroyed the sandbox —
@@ -1734,6 +1762,8 @@ func (s *Server) checkpointInPlace(ctx context.Context, sbx *sandbox.Sandbox, in
 	// default resume-prefetch-source, and every sandbox from it demand-faults its
 	// working set.
 
+	s.bindSnapshotWrites(context.WithoutCancel(ctx), res, diskReservation)
+	diskHandedOff = true
 	deferred = res.memoryExportDeferred
 	if err := s.runCheckpointUpload(ctx, sbx, res, in, codes.FailedPrecondition, nil); err != nil {
 		return nil, deferred, err
@@ -1787,7 +1817,22 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 	// only by a Delete for the sandbox or by server shutdown. The claim is
 	// taken first so no interleaving finds the sandbox neither live nor in
 	// flight.
-	ctx, op, ok := s.registerDetachedCheckpoint(callerCtx, sbx)
+	admittedCtx, releaseReplacement, err := s.admitCheckpointReplacement(callerCtx, sbx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseReplacement()
+	diskReservation, err := s.admitCheckpointDisk(callerCtx, sbx, false)
+	if err != nil {
+		return nil, err
+	}
+	diskHandedOff := false
+	defer func() {
+		if !diskHandedOff {
+			diskReservation.Release()
+		}
+	}()
+	ctx, op, ok := s.registerDetachedCheckpoint(admittedCtx, sbx)
 	if !ok {
 		return nil, errSandboxOperationInProgress(in.GetSandboxId())
 	}
@@ -1832,7 +1877,7 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 		s.finishSandboxStartThen(ctx, reservation, rollback, checkpointErr, op.release)
 	}()
 
-	reservation, err := op.reserve(ctx, s.sandboxFactory.Sandboxes, sbx)
+	reservation, err = op.reserve(ctx, s.sandboxFactory.Sandboxes, sbx)
 	if err != nil {
 		if errors.Is(err, sandbox.ErrSandboxOperationInProgress) {
 			return nil, errSandboxOperationInProgress(in.GetSandboxId())
@@ -1858,6 +1903,7 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 	err = withContextCause(snapshotCtx, err)
 	cancelSnapshotBudget()
 	if err != nil {
+		diskReservation.Failed(err)
 		s.reportCheckpointStepError(ctx, "error snapshotting sandbox for checkpoint", err, in.GetSandboxId())
 
 		return nil, status.Errorf(codes.Internal, "error snapshotting sandbox '%s': %s", in.GetSandboxId(), err)
@@ -1866,6 +1912,8 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 	// Every return before runCheckpointUpload leaves the registered upload
 	// unrun. The settle above abandons it, so its waiters fail instead of
 	// hanging and its template cache pin is returned.
+	s.bindSnapshotWrites(context.WithoutCancel(ctx), res, diskReservation)
+	diskHandedOff = true
 	handoff = &checkpointHandoff{res: res}
 
 	if err := checkpointEnded(ctx, in.GetSandboxId()); err != nil {

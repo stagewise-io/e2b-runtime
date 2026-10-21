@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -46,6 +47,7 @@ import (
 	nfscfg "github.com/e2b-dev/infra/packages/orchestrator/pkg/nfsproxy/cfg"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/portmap"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/proxy"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/resourcecontroller"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/routing"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block/metrics"
@@ -489,7 +491,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 	// Enforce a single host-level sandbox runtime instance.
 	// Skip this check in development mode.
-	if !env.IsDevelopment() && usesSandboxRuntime {
+	if (!env.IsDevelopment() || config.ResourceAdmission.Enabled) && usesSandboxRuntime {
 		f, err := acquireOrchestratorLock(config.OrchestratorLockPath)
 		if err != nil {
 			log.Fatalf("Failed to acquire orchestrator lock %s: %v", config.OrchestratorLockPath, err)
@@ -874,6 +876,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	// partial failure leaves anchor namespaces that must keep their v2 set entries.
 	reclaimClean := false
 	reclaimRan := false
+	admissionReclaimClean := false
 	if usesSandboxRuntime && !config.DisableStartupReclaim {
 		reclaimRan = true
 		cacheDirs := []string{config.StorageConfig.SandboxCacheDir, config.StorageConfig.TemplateCacheDir, config.TemplatesDir}
@@ -893,12 +896,24 @@ func run(config cfg.Config, opts Options) (success bool) {
 		})
 		// A cache dir the sweep left alone keeps only files, never slot state.
 		reclaimClean = !summary.HasRuntimeFailures()
+		admissionReclaimClean = !summary.HasFailures() && err == nil
 		if egressSetup.StartupReclaim != nil {
 			if err := egressSetup.StartupReclaim(ctx); err != nil {
 				logger.L().Error(ctx, "failed to reclaim edition network state", zap.Error(err))
 			}
 		}
 	}
+
+	admission, err := newResourceController(config, reclaimRan, admissionReclaimClean)
+	if err != nil {
+		logger.L().Fatal(ctx, "unsafe resource admission startup", zap.Error(err))
+	}
+
+	admissionMetrics, err := admission.RegisterMetrics(tel.MeterProvider.Meter("github.com/e2b-dev/infra/packages/orchestrator/pkg/resourcecontroller"))
+	if err != nil {
+		logger.L().Fatal(ctx, "failed to register resource admission metrics", zap.Error(err))
+	}
+	closers = append(closers, closer{"resource admission metrics", func(context.Context) error { return admissionMetrics.Unregister() }})
 
 	if usesSandboxRuntime {
 		tracker, err := metrics.NewFirecrackerTracker(tel.MeterProvider, sandboxes)
@@ -1010,7 +1025,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if networkAssignHook == nil {
 		networkAssignHook = sandbox.NoopNetworkAssignHook{}
 	}
-	sandboxFactory := sandbox.NewFactory(ctx, config.BuilderConfig, networkPool, devicePool, featureFlags, hostStatsDelivery, cgroupManager, egressSetup.Proxy, networkAssignHook, sandboxes)
+	sandboxFactory := sandbox.NewFactory(ctx, config.BuilderConfig, networkPool, devicePool, featureFlags, hostStatsDelivery, cgroupManager, egressSetup.Proxy, networkAssignHook, sandboxes, admission)
 
 	// confined volume filesystems (for the volume service and nfs proxy)
 	if err := chrooted.CheckSupport(); err != nil {
@@ -1140,7 +1155,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		closers = append(closers, closer{"template server", tmpl.Close})
 	}
 
-	infoService := service.NewInfoService(serviceInfo, sandboxes, hostMetrics)
+	infoService := service.NewInfoService(serviceInfo, sandboxes, hostMetrics, admission)
 	orchestratorinfo.RegisterInfoServiceServer(grpcServer, infoService)
 
 	grpcHealth := health.NewServer()
@@ -1267,6 +1282,27 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}
 
 	return success
+}
+
+// Enabled admission may only start after host locking and complete reclaim.
+func newResourceController(config cfg.Config, reclaimRan, reclaimClean bool) (*resourcecontroller.Controller, error) {
+	if config.ResourceAdmission.Enabled && (!reclaimRan || !reclaimClean) {
+		return nil, errors.New("resource admission requires successful startup reclaim")
+	}
+	policy, err := config.ResourceAdmission.Policy()
+	if err != nil {
+		return nil, err
+	}
+
+	return resourcecontroller.New(resourcecontroller.Options{
+		Policy: policy, CPUCount: uint64(runtime.NumCPU()), Sample: resourcecontroller.SamplePath,
+		Paths: map[string]string{
+			resourcecontroller.Rootfs:   config.StorageConfig.SandboxCacheDir,
+			resourcecontroller.Build:    config.DefaultCacheDir,
+			resourcecontroller.Template: config.StorageConfig.TemplateCacheDir,
+			"build-rootfs":              config.TemplatesDir,
+		},
+	})
 }
 
 func startNFSProxy(

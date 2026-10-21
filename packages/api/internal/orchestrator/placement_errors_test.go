@@ -69,6 +69,14 @@ func TestPlacementAPIError(t *testing.T) {
 			wantRetry:     apierrors.CanRetry,
 		},
 		{
+			name:          "resource admission unsupported",
+			err:           placement.UnsupportedResourceAdmissionError{},
+			wantCode:      http.StatusServiceUnavailable,
+			wantErrorCode: "sandbox_feature_unsupported",
+			wantMsg:       "Failed to place sandbox: no orchestrator supports enforced CPU and disk admission",
+			wantRetry:     apierrors.NoRetry,
+		},
+		{
 			name:          "no eligible node",
 			err:           placement.FailedToPlaceSandboxError{},
 			wantCode:      http.StatusServiceUnavailable,

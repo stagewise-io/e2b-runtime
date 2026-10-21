@@ -355,7 +355,7 @@ func TestCgroupRemovalAcrossCleanupRegistration(t *testing.T) {
 			if tc.failStartup {
 				result = startErr
 			}
-			cleanupIfNotRegistered(ctx, &result, &registered, remove)
+			cleanup.cleanupIfNotRegistered(ctx, &result, &registered, remove)
 			cleanupErr := cleanup.Run(ctx)
 			if removeCalls != 1 {
 				t.Fatalf("cgroup removal ran %d times, want once", removeCalls)

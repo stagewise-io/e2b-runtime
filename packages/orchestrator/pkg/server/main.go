@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,7 +84,8 @@ type Server struct {
 
 	// buildDisk is the filesystem holding the build directory, as the pause
 	// disk admission sees it (pause_disk_admission.go).
-	buildDisk *buildDisk
+	buildDisk       *buildDisk
+	templateStorage storage.Spec
 
 	sandboxCreateDuration     metric.Int64Histogram
 	sandboxExecutionDuration  metric.Int64Histogram
@@ -139,6 +141,14 @@ type ServiceConfig struct {
 }
 
 func New(ctx context.Context, cfg ServiceConfig) (*Server, error) {
+	if cfg.SandboxFactory.Admission.Enabled() && cfg.TemplateStorage.Provider == storage.LocalStorageProvider {
+		if err := os.MkdirAll(cfg.TemplateStorage.BasePath, 0o755); err != nil {
+			return nil, fmt.Errorf("initialize snapshot storage: %w", err)
+		}
+		if err := cfg.SandboxFactory.Admission.RegisterPath("snapshot-storage", cfg.TemplateStorage.BasePath); err != nil {
+			return nil, err
+		}
+	}
 	uploadedBuilds := ttlcache.New[string, struct{}](
 		ttlcache.WithTTL[string, struct{}](uploadedBuildsTTL),
 	)
@@ -168,7 +178,8 @@ func New(ctx context.Context, cfg ServiceConfig) (*Server, error) {
 
 		detachedCheckpoints: map[string]*detachedCheckpoint{},
 
-		buildDisk: newBuildDisk(cfg.Config.DefaultCacheDir, cfg.TemplateStorage),
+		buildDisk:       newBuildDisk(cfg.Config.DefaultCacheDir, cfg.TemplateStorage),
+		templateStorage: cfg.TemplateStorage,
 	}
 	server.shutdownCtx, server.shutdown = context.WithCancel(context.Background())
 	server.updateMaxSandboxesLimit(ctx)

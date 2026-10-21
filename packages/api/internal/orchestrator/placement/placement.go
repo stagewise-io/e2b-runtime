@@ -35,9 +35,10 @@ type PlacementResult struct {
 // Requirements are what a node must meet to take a sandbox; a zero field
 // imposes nothing.
 type Requirements struct {
-	CPU      CPURequirement
-	Features FeatureRequirement
-	Memory   MemoryRequirement
+	CPU               CPURequirement
+	Features          FeatureRequirement
+	Memory            MemoryRequirement
+	ResourceAdmission bool
 }
 
 // Algorithm defines the interface for sandbox placement strategies.
@@ -111,6 +112,7 @@ func placeSandbox(
 	resources := nodemanager.SandboxResources{
 		CPUs:      sbxRequest.GetSandbox().GetVcpu(),
 		MiBMemory: sbxRequest.GetSandbox().GetRamMb(),
+		MiBDisk:   sbxRequest.GetSandbox().GetTotalDiskSizeMb(),
 		HugePages: sbxRequest.GetSandbox().GetHugePages(),
 	}
 
@@ -118,7 +120,7 @@ func placeSandbox(
 	// Vetted here rather than trusted: the preferred node skips chooseNode, so
 	// affinity would otherwise outrank the CPU and feature requirements on
 	// every resume. Memory is checked when the placement is recorded below.
-	if preferredNode != nil && NodeSatisfiesCPU(preferredNode, requirements.CPU) && NodeSatisfiesFeatures(preferredNode, requirements.Features) {
+	if preferredNode != nil && NodeSatisfiesCPU(preferredNode, requirements.CPU) && NodeSatisfiesFeatures(preferredNode, requirements.Features) && NodeSupportsResourceAdmission(preferredNode, requirements.ResourceAdmission) {
 		node = preferredNode
 	}
 
@@ -128,6 +130,10 @@ func placeSandbox(
 	// classifies them better.
 	if node == nil && len(clusterNodes) > 0 && ctx.Err() == nil && !anyNodeSatisfiesFeatures(clusterNodes, requirements.Features) {
 		return PlacementResult{}, UnsupportedFeatureError{Features: requirements.Features.FeatureNames(), MinVersion: requirements.Features.MinVersion()}
+	}
+
+	if node == nil && len(clusterNodes) > 0 && ctx.Err() == nil && !anyNodeSupportsResourceAdmission(clusterNodes, requirements.ResourceAdmission) {
+		return PlacementResult{}, UnsupportedResourceAdmissionError{}
 	}
 
 	// First node that attempted the create (not a fast ResourceExhausted refusal).
@@ -221,10 +227,11 @@ func placeSandbox(
 		}
 
 		chosen := node
-		if !node.PlacementMetrics.StartPlacingIf(sbxRequest.GetSandbox().GetSandboxId(), resources, func() bool {
-			return NodeSatisfiesMemory(chosen, resources, requirements.Memory)
-		}) {
-			telemetry.ReportEvent(ctx, "Node's hugepage pool is full", telemetry.WithNodeID(node.ID))
+		placementAttempt := node.PlacementMetrics.BeginPlacingIf(sbxRequest.GetSandbox().GetSandboxId(), resources, func() bool {
+			return NodeSatisfiesMemory(chosen, resources, requirements.Memory) && NodeSatisfiesResources(chosen, resources, requirements.ResourceAdmission)
+		})
+		if placementAttempt == nil {
+			telemetry.ReportEvent(ctx, "Node resource capacity unavailable", telemetry.WithNodeID(node.ID))
 			nodesExcluded[node.ID] = struct{}{}
 			node = nil
 			poolsFull = true
@@ -253,7 +260,7 @@ func placeSandbox(
 			// Added before the in-flight entry is dropped, so a concurrent
 			// memory check always counts this sandbox somewhere.
 			node.OptimisticAdd(resources)
-			node.PlacementMetrics.Success(sbxRequest.GetSandbox().GetSandboxId())
+			placementAttempt.Success()
 
 			return PlacementResult{Node: node, Response: resp}, nil
 		}
@@ -276,7 +283,7 @@ func placeSandbox(
 		switch statusCode {
 		case codes.ResourceExhausted:
 			refusals++
-			failedNode.PlacementMetrics.Skip(sbxRequest.GetSandbox().GetSandboxId())
+			placementAttempt.Skip()
 
 			delay := backoff.delay(refusals)
 			logger.L().Warn(ctx, "Node exhausted, trying another node", logger.WithSandboxID(sbxRequest.GetSandbox().GetSandboxId()), logger.WithNodeID(failedNode.ID), zap.Int("refusals", refusals), zap.Duration("retry_in", delay), zap.Error(utils.UnwrapGRPCError(err)))
@@ -296,13 +303,13 @@ func placeSandbox(
 			// it, and no warmed node, or a resume's origin would be
 			// remapped to the node that just refused for good.
 			if ok && createRefusedForGood(st) {
-				failedNode.PlacementMetrics.Skip(sbxRequest.GetSandbox().GetSandboxId())
+				placementAttempt.Skip()
 				logger.L().Warn(ctx, "Sandbox refused by the node for good", logger.WithSandboxID(sbxRequest.GetSandbox().GetSandboxId()), logger.WithTemplateID(sbxRequest.GetSandbox().GetTemplateId()), logger.WithBuildID(sbxRequest.GetSandbox().GetBuildId()), logger.WithNodeID(failedNode.ID), zap.Error(utils.UnwrapGRPCError(err)))
 
 				return PlacementResult{}, SandboxCreateError{Attempts: attempt + 1, LastErr: err}
 			}
 			nodesExcluded[failedNode.ID] = struct{}{}
-			failedNode.PlacementMetrics.Fail(sbxRequest.GetSandbox().GetSandboxId())
+			placementAttempt.Fail()
 			logger.L().Error(ctx, "Failed to create sandbox", logger.WithSandboxID(sbxRequest.GetSandbox().GetSandboxId()), logger.WithTemplateID(sbxRequest.GetSandbox().GetTemplateId()), logger.WithBuildID(sbxRequest.GetSandbox().GetBuildId()), logger.WithNodeID(failedNode.ID), zap.Int("attempt", attempt+1), zap.Error(utils.UnwrapGRPCError(err)))
 			lastCreateErr = err
 			attempt++

@@ -176,7 +176,15 @@ The control-plane entry point (Gin, OpenAPI-generated from `spec/openapi.yml`, p
   of the node's pool ceiling (base pool plus overcommit allowance, reported by
   the orchestrator); within an API replica the check and the in-flight record
   are one step per node, and when the compatible nodes are all full placement
-  answers with a capacity error, not "no compatible node".
+  answers with a capacity error, not "no compatible node". The separate, default-off
+  `placement-resource-admission` flag applies the node's reported CPU and disk limits
+  during candidate sampling and the final atomic pending insert, including preferred
+  resumes. Reports must be locally requested within 30 seconds. Missing or disabled
+  support is a capability mismatch; stale or invalid reports are temporary capacity
+  shortages. Disk demand is the total rootfs size, not requested template free space.
+  Successful per-attempt overlays remain until a report requested after success arrives;
+  deletes never subtract authoritative commitments. The orchestrator remains the authority
+  across independent API replicas.
 - **State**: writes sandbox records to Redis (source of truth for *running* sandboxes). It does
   not write routing: client-proxy reads the orchestrator-written `sandbox:routing:{id}` (see
   "Sandbox routing records"). Persistent entities (templates, builds, snapshots, teams) live in
@@ -291,6 +299,25 @@ by itself authorize node deletion.
 `InfoService.ServiceInfo.max_sandboxes` reports the cached node limit for every service role.
 Admin `/nodes` and `/nodes/{nodeID}` return required `maxSandboxes`, including zero. Admission,
 metrics, and node info share the value refreshed from node-scoped flags every 30 seconds.
+
+Resource admission adds an optional, versioned `resource_admission` message
+on `ServiceInfoResponse` without changing the existing live-allocation fields or
+`outstanding_work`. Startup now shares one controller across runtime roles and InfoService,
+requires the host lock and successful reclaim when enabled. InfoService returns a fresh
+ledger snapshot, including in-flight and stopping commitments, without changing the
+legacy live-only allocation counters. Failed measurements preserve commitments and mark
+the report invalid. Public creates acquire before template fetch; common VM constructors reconcile the rootfs size and
+retain commitments through tracked cleanup. Resume-fresh checkpoints reserve a second
+physical lifecycle before destructive work. Pause and both checkpoint paths share the
+create ledger for snapshot writes, retaining reservations through deferred writers and
+upload completion. Throwaway harvests use common factory admission and skip on refusal.
+The shared controller exports bounded rejection reasons, commitment and write gauges,
+and measurement validity. API filtering consumes its versioned limits independently
+of the best-of-K scoring ratio. Both `RESOURCE_ADMISSION_ENABLED` and
+`PLACEMENT_RESOURCE_ADMISSION` default to false. No deployment values are selected or
+changed. The Linux suites do not validate privileged KVM/NBD lifecycles, and API
+short-mode tests skip database integration. See
+[Resource admission](resource-admission.md) for the controller contract and validation limits.
 
 Key mechanisms (all under `pkg/sandbox/`):
 

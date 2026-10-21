@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -15,10 +16,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/resourcecontroller"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/fc"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
 	sbxlogger "github.com/e2b-dev/infra/packages/shared/pkg/logger/sandbox"
+	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
@@ -91,12 +94,24 @@ func statNearestExisting(path string) (unix.Stat_t, bool) {
 // With template storage on the same filesystem (shared) the upload writes a
 // second copy of everything.
 func (s *Server) pauseDiskNeed(ctx context.Context, sbx *sandbox.Sandbox, filesystemOnly, shared bool) (int64, error) {
-	need := pauseSnapfileAllowance
+	need := uint64(pauseSnapfileAllowance)
 	if !filesystemOnly {
-		ram := sbx.Config.RamMB << 20
-		need += ram
+		if sbx.Config.RamMB < 0 {
+			return 0, errors.New("negative snapshot memory size")
+		}
+		ram, err := resourceadmission.Multiply(uint64(sbx.Config.RamMB), resourceadmission.MiB)
+		if err != nil {
+			return 0, err
+		}
 		if !s.memfdExport(ctx, sbx) && s.memfileDedupEnabled(ctx) {
-			need += ram
+			ram, err = resourceadmission.Multiply(ram, 2)
+			if err != nil {
+				return 0, err
+			}
+		}
+		need, err = resourceadmission.Add(need, ram)
+		if err != nil {
+			return 0, err
 		}
 	}
 
@@ -104,13 +119,21 @@ func (s *Server) pauseDiskNeed(ctx context.Context, sbx *sandbox.Sandbox, filesy
 	if err != nil {
 		return 0, fmt.Errorf("rootfs cache size: %w", err)
 	}
-	need += rootfs
-
+	if rootfs < 0 {
+		return 0, errors.New("negative snapshot rootfs size")
+	}
+	need, err = resourceadmission.Add(need, uint64(rootfs))
+	if err != nil {
+		return 0, err
+	}
 	if shared {
-		need *= 2
+		need, err = resourceadmission.Multiply(need, 2)
+	}
+	if err != nil || need > math.MaxInt64 {
+		return 0, errors.New("snapshot size overflow")
 	}
 
-	return need, nil
+	return int64(need), nil
 }
 
 // memfdExport reports whether the sandbox's memory is exported from a memfd
@@ -202,6 +225,7 @@ type pauseDiskReservation struct {
 
 	remaining  int64
 	secondCopy int64
+	writes     []*resourcecontroller.WriteLease
 }
 
 // Written says the memory and rootfs diffs are on disk.
@@ -210,6 +234,17 @@ func (r *pauseDiskReservation) Written() {
 		return
 	}
 
+	if r.writes != nil {
+		// Build and template bytes are now measured. Local persistence may
+		// still write its full second copy until upload completion.
+		for i, lease := range r.writes {
+			if i < 2 {
+				_ = lease.Reduce(0)
+			}
+		}
+
+		return
+	}
 	r.disk.mu.Lock()
 	defer r.disk.mu.Unlock()
 
@@ -225,6 +260,13 @@ func (r *pauseDiskReservation) Release() {
 		return
 	}
 
+	if r.writes != nil {
+		for _, lease := range r.writes {
+			lease.Release(nil)
+		}
+
+		return
+	}
 	r.disk.mu.Lock()
 	defer r.disk.mu.Unlock()
 
@@ -240,6 +282,9 @@ func (r *pauseDiskReservation) Release() {
 // a filesystem whose free space cannot be read admits the pause, as before the
 // check existed. Both return a nil reservation.
 func (s *Server) admitPauseDisk(ctx context.Context, sbx *sandbox.Sandbox, filesystemOnly bool) (*pauseDiskReservation, error) {
+	if s.sandboxFactory != nil && s.sandboxFactory.Admission.Enabled() {
+		return s.admitSnapshotWrites(ctx, sbx, filesystemOnly)
+	}
 	headroomMiB := s.featureFlags.IntFlag(ctx, featureflags.PauseAdmissionDiskHeadroomMiB)
 	if headroomMiB < 0 {
 		return nil, nil
@@ -283,6 +328,94 @@ func (s *Server) admitPauseDisk(ctx context.Context, sbx *sandbox.Sandbox, files
 	}
 
 	return reservation, nil
+}
+
+// Failed conservatively retains enabled estimates when snapshot rollback cannot
+// establish that all deferred writers have stopped. Legacy behavior is unchanged.
+func (r *pauseDiskReservation) Failed(err error) {
+	if r == nil {
+		return
+	}
+	for _, lease := range r.writes {
+		lease.Release(err)
+	}
+}
+
+func (s *Server) admitCheckpointDisk(ctx context.Context, sbx *sandbox.Sandbox, filesystemOnly bool) (*pauseDiskReservation, error) {
+	if s.sandboxFactory == nil || !s.sandboxFactory.Admission.Enabled() {
+		return nil, nil
+	}
+
+	return s.admitSnapshotWrites(ctx, sbx, filesystemOnly)
+}
+
+// admitSnapshotWrites uses the create ledger even when legacy pause admission
+// is disabled. Each write is charged to its destination device, never pooled.
+func (s *Server) admitSnapshotWrites(ctx context.Context, sbx *sandbox.Sandbox, filesystemOnly bool) (*pauseDiskReservation, error) {
+	need, err := s.pauseDiskNeed(ctx, sbx, filesystemOnly, false)
+	if err != nil || need < pauseSnapfileAllowance {
+		return nil, resourceAdmissionStatus(&resourceadmission.RefusalError{Reason: resourceadmission.Measurement})
+	}
+	r := &pauseDiskReservation{writes: make([]*resourcecontroller.WriteLease, 0, 3)}
+	quantities := []struct {
+		role  string
+		bytes uint64
+	}{
+		{resourcecontroller.Build, uint64(need - pauseSnapfileAllowance)},
+		{resourcecontroller.Template, uint64(pauseSnapfileAllowance)},
+	}
+	if s.templateStorage.Provider == storage.LocalStorageProvider {
+		quantities = append(quantities, struct {
+			role  string
+			bytes uint64
+		}{"snapshot-storage", uint64(need)})
+	}
+	for _, q := range quantities {
+		lease, acquireErr := s.sandboxFactory.Admission.AcquireWrites(q.role, q.bytes)
+		if acquireErr != nil {
+			r.Release()
+
+			return nil, resourceAdmissionStatus(acquireErr)
+		}
+		r.writes = append(r.writes, lease)
+	}
+
+	return r, nil
+}
+
+// bindSnapshotWrites keeps the reservation until both sealing and upload settle.
+func (s *Server) bindSnapshotWrites(ctx context.Context, res *snapshotResult, r *pauseDiskReservation) {
+	if r == nil {
+		return
+	}
+	done := make(chan struct{})
+	finish := sync.OnceFunc(func() { close(done) })
+	complete, abandon := res.completeUpload, res.abandonUpload
+	res.completeUpload = func(ctx context.Context, err error) { defer finish(); complete(ctx, err) }
+	res.abandonUpload = func(ctx context.Context, err error) { defer finish(); abandon(ctx, err) }
+	releaseWork := s.info.TrackWork()
+	go func() {
+		defer releaseWork()
+		// Join every writer even when an earlier seal failed. The harvest
+		// waiter returns on the first failure and cannot establish that.
+		var sealErr error
+		if res.memoryExportDeferred && res.waitMemorySealed != nil {
+			sealErr = res.waitMemorySealed(ctx)
+		}
+		_, rootfsErr := res.rootfsDiff.CachePath(ctx)
+		sealErr = errors.Join(sealErr, rootfsErr)
+		if res.memoryDiff != nil {
+			_, memoryErr := res.memoryDiff.CachePath(ctx)
+			sealErr = errors.Join(sealErr, memoryErr)
+		}
+		if sealErr != nil {
+			r.Failed(sealErr)
+		} else {
+			r.Written()
+		}
+		<-done
+		r.Release()
+	}()
 }
 
 // releasePauseDiskWhenWritten marks the reservation written once the capture

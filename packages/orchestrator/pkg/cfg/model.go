@@ -16,10 +16,33 @@ import (
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/network"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
+	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
 const DefaultBusyboxVersion = "1.36.1"
+
+// ResourceAdmissionConfig is node-wide and fixed until the process restarts.
+type ResourceAdmissionConfig struct {
+	Enabled     bool   `env:"RESOURCE_ADMISSION_ENABLED"           envDefault:"false"`
+	CPUPercent  uint64 `env:"RESOURCE_ADMISSION_CPU_PERCENT"`
+	DiskPercent uint64 `env:"RESOURCE_ADMISSION_DISK_PERCENT"`
+	HeadroomMiB uint64 `env:"RESOURCE_ADMISSION_DISK_HEADROOM_MIB"`
+}
+
+func (c ResourceAdmissionConfig) Policy() (resourceadmission.Policy, error) {
+	p := resourceadmission.Policy{Enabled: c.Enabled, CPUPercent: c.CPUPercent, DiskPercent: c.DiskPercent}
+	if !c.Enabled {
+		return p, nil
+	}
+	headroom, err := resourceadmission.Multiply(c.HeadroomMiB, resourceadmission.MiB)
+	if err != nil {
+		return p, fmt.Errorf("resource admission headroom: %w", err)
+	}
+	p.HeadroomBytes = headroom
+
+	return p, p.Validate()
+}
 
 type BuilderConfig struct {
 	featureflags.Config
@@ -38,8 +61,9 @@ type BuilderConfig struct {
 
 	Provider string `env:"PROVIDER" envDefault:"gcp"`
 
-	StorageConfig storage.Config
-	NetworkConfig network.Config
+	ResourceAdmission ResourceAdmissionConfig
+	StorageConfig     storage.Config
+	NetworkConfig     network.Config
 }
 
 func makePathsAbsolute(c *BuilderConfig) error {
@@ -166,6 +190,10 @@ func Parse() (Config, error) {
 		return config, err
 	}
 
+	if _, err := config.ResourceAdmission.Policy(); err != nil {
+		return config, err
+	}
+
 	bc := config.BuilderConfig
 	if err = makePathsAbsolute(&bc); err != nil {
 		return config, err
@@ -199,6 +227,10 @@ func Parse() (Config, error) {
 func ParseBuilder() (BuilderConfig, error) {
 	model, err := env.ParseAs[BuilderConfig]()
 	if err != nil {
+		return BuilderConfig{}, err
+	}
+
+	if _, err := model.ResourceAdmission.Policy(); err != nil {
 		return BuilderConfig{}, err
 	}
 

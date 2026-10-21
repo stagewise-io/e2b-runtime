@@ -152,10 +152,11 @@ func (b *BestOfK) chooseNode(_ context.Context, nodes []*nodemanager.Node, exclu
 		}
 
 		return nil, FailedToPlaceSandboxError{
-			filterByLabels: filterByLabels,
-			requiredLabels: requiredLabels,
-			cpu:            requirements.CPU,
-			features:       requirements.Features,
+			filterByLabels:    filterByLabels,
+			requiredLabels:    requiredLabels,
+			cpu:               requirements.CPU,
+			features:          requirements.Features,
+			resourceAdmission: requirements.ResourceAdmission,
 		}
 	}
 
@@ -163,10 +164,11 @@ func (b *BestOfK) chooseNode(_ context.Context, nodes []*nodemanager.Node, exclu
 }
 
 type FailedToPlaceSandboxError struct {
-	filterByLabels bool
-	requiredLabels []string
-	cpu            CPURequirement
-	features       FeatureRequirement
+	filterByLabels    bool
+	requiredLabels    []string
+	cpu               CPURequirement
+	features          FeatureRequirement
+	resourceAdmission bool
 }
 
 var _ error = FailedToPlaceSandboxError{}
@@ -186,6 +188,10 @@ func (e FailedToPlaceSandboxError) Error() string {
 		message += fmt.Sprintf(", features=%v, min_orchestrator_version=%s", e.features.FeatureNames(), e.features.MinVersion())
 	}
 
+	if e.resourceAdmission {
+		message += ", resource_admission=true"
+	}
+
 	return message
 }
 
@@ -197,7 +203,7 @@ func unavailableNodeWouldFit(nodes []*nodemanager.Node, excludedNodes map[string
 			continue
 		}
 
-		if NodeSatisfiesCPU(n, requirements.CPU) && NodeSatisfiesFeatures(n, requirements.Features) && (!filterByLabels || isNodeLabelsCompatible(n, requiredLabels)) {
+		if NodeSatisfiesCPU(n, requirements.CPU) && NodeSatisfiesFeatures(n, requirements.Features) && NodeSupportsResourceAdmission(n, requirements.ResourceAdmission) && (!filterByLabels || isNodeLabelsCompatible(n, requiredLabels)) {
 			return true
 		}
 	}
@@ -256,7 +262,11 @@ func (b *BestOfK) sample(items []*nodemanager.Node, config BestOfKConfig, exclud
 			continue
 		}
 
-		if !NodeSatisfiesMemory(n, resources, requirements.Memory) {
+		if !NodeSupportsResourceAdmission(n, requirements.ResourceAdmission) {
+			continue
+		}
+
+		if !NodeSatisfiesMemory(n, resources, requirements.Memory) || !NodeSatisfiesResources(n, resources, requirements.ResourceAdmission) {
 			poolsFull = true
 
 			continue

@@ -93,6 +93,7 @@ func New(
 	}
 	client.Init(ctx)
 
+	requestedAt := time.Now()
 	nodeInfo, err := client.Info.ServiceInfo(ctx, &emptypb.Empty{})
 	if err != nil {
 		_ = client.Close()
@@ -137,7 +138,7 @@ func New(
 		},
 	}
 
-	n.UpdateMetricsFromServiceInfoResponse(nodeInfo)
+	n.UpdateMetricsFromSync(nodeInfo, requestedAt)
 	n.setMachineInfo(nodeInfo.GetMachineInfo())
 	n.setLabels(nodeInfo.GetLabels())
 
@@ -179,6 +180,7 @@ func NewClusterNode(ctx context.Context, client *clusters.GRPCClient, clusterID 
 	}
 
 	nodeClient, ctx := n.GetClient(ctx)
+	requestedAt := time.Now()
 	nodeInfo, err := nodeClient.Info.ServiceInfo(ctx, &emptypb.Empty{})
 	if err != nil {
 		logger.L().Error(ctx, "Failed to get node service info", zap.Error(err), logger.WithNodeID(n.ID))
@@ -186,7 +188,7 @@ func NewClusterNode(ctx context.Context, client *clusters.GRPCClient, clusterID 
 		return n, nil
 	}
 
-	n.UpdateMetricsFromServiceInfoResponse(nodeInfo)
+	n.UpdateMetricsFromSync(nodeInfo, requestedAt)
 	n.setMachineInfo(nodeInfo.GetMachineInfo())
 	n.setLabels(nodeInfo.GetLabels())
 

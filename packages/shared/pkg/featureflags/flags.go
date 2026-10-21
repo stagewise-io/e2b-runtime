@@ -82,6 +82,10 @@ func NewJSONFlag(name string, fallback ldvalue.Value) JSONFlag {
 	return flag
 }
 
+// PlacementResourceAdmission enables filtering on the node's versioned,
+// authoritative CPU/disk policy. Enforcement on the node is independent.
+var PlacementResourceAdmission = NewBoolFlag("placement-resource-admission", envBoolOr("PLACEMENT_RESOURCE_ADMISSION", false))
+
 var CleanNFSCache = NewJSONFlag("clean-nfs-cache", ldvalue.Null())
 
 // RateLimitConfigFlag provides per-team rate limit overrides.

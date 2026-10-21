@@ -38,6 +38,29 @@ message MachineInfo {
   repeated string cpu_flags = 5;
 }
 
+// Additive contract. An absent report means the node predates admission.
+message ResourceAdmissionReport {
+  uint32 version = 1;
+  bool enabled = 2;
+  bool valid = 3;
+  bool uncertain = 4;
+  uint64 cpu_limit = 5;
+  uint64 cpu_committed = 6;
+  repeated ResourceAdmissionFilesystem filesystems = 7;
+}
+
+message ResourceAdmissionFilesystem {
+  string id = 1;
+  repeated string roles = 2;
+  bool valid = 3;
+  uint64 total_bytes = 4;
+  uint64 available_bytes = 5;
+  uint64 logical_limit_bytes = 6;
+  uint64 logical_committed_bytes = 7;
+  uint64 write_reserved_bytes = 8;
+  uint64 headroom_bytes = 9;
+}
+
 message ServiceInfoResponse {
   string node_id = 1;
   string service_id = 2;
@@ -56,6 +79,9 @@ message ServiceInfoResponse {
 
   // Nonpositive values reject sandbox creation.
   int64 max_sandboxes = 59;
+
+  // Includes starting and stopping physical lifecycles, unlike live metrics.
+  ResourceAdmissionReport resource_admission = 60;
 
   int64 metric_vcpu_used = 101 [deprecated = true];
   int64 metric_memory_used_mb = 102 [deprecated = true];

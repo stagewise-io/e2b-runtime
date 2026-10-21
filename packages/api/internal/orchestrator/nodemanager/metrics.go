@@ -5,6 +5,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/api/internal/api"
 	orchestratorinfo "github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator-info"
+	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
 )
 
 type DiskMetrics struct {
@@ -25,6 +26,9 @@ type Metrics struct {
 	SandboxCount         uint32
 	MaxSandboxes         int64
 	OutstandingWork      uint64
+	DiskAllocatedBytes   uint64
+	ResourceAdmission    *resourceadmission.Report
+	AdmissionRequestedAt time.Time
 
 	// Hugepage pool metrics (page counts)
 	HugePagesTotal    uint64
@@ -38,10 +42,12 @@ type Metrics struct {
 }
 
 func (n *Node) UpdateMetricsFromServiceInfoResponse(info *orchestratorinfo.ServiceInfoResponse) {
+	// Callers without a request timestamp cannot establish freshness or retire
+	// successful overlays. Discovery and periodic sync use UpdateMetricsFromSync.
 	n.metricsMu.Lock()
 	defer n.metricsMu.Unlock()
-
 	n.updateMetrics(info)
+	n.metrics.AdmissionRequestedAt = time.Time{}
 }
 
 // UpdateMetricsFromSync applies a sample requested at requestedAt. A hugepage
@@ -51,8 +57,15 @@ func (n *Node) UpdateMetricsFromSync(info *orchestratorinfo.ServiceInfoResponse,
 	n.metricsMu.Lock()
 	defer n.metricsMu.Unlock()
 
+	// Do not let a slower, older RPC replace newer admission data or retire
+	// overlays against a report that predates the retained sample.
+	if !n.metrics.AdmissionRequestedAt.IsZero() && requestedAt.Before(n.metrics.AdmissionRequestedAt) {
+		return
+	}
 	used, reserved := n.metrics.HugePagesUsed, n.metrics.HugePagesReserved
 	n.updateMetrics(info)
+	n.metrics.AdmissionRequestedAt = requestedAt
+	n.PlacementMetrics.retireSuccesses(requestedAt)
 	if n.lastHugePageAdd.After(requestedAt) {
 		n.metrics.HugePagesUsed, n.metrics.HugePagesReserved = used, reserved
 	}
@@ -70,6 +83,9 @@ func (n *Node) updateMetrics(info *orchestratorinfo.ServiceInfoResponse) {
 	// Update allocated resources
 	n.metrics.CpuAllocated = info.GetMetricCpuAllocated()
 	n.metrics.MemoryAllocatedBytes = info.GetMetricMemoryAllocatedBytes()
+	n.metrics.DiskAllocatedBytes = info.GetMetricDiskAllocatedBytes()
+	// FromProto deep-copies and preserves missing versus invalid capability.
+	n.metrics.ResourceAdmission = resourceadmission.FromProto(info.GetResourceAdmission())
 
 	// Update total sandbox count
 	n.metrics.SandboxCount = info.GetMetricSandboxesRunning()
@@ -113,6 +129,8 @@ func (n *Node) Metrics() Metrics {
 		SandboxCount:         n.metrics.SandboxCount,
 		MaxSandboxes:         n.metrics.MaxSandboxes,
 		OutstandingWork:      n.metrics.OutstandingWork,
+		DiskAllocatedBytes:   n.metrics.DiskAllocatedBytes,
+		AdmissionRequestedAt: n.metrics.AdmissionRequestedAt,
 
 		HugePagesTotal:    n.metrics.HugePagesTotal,
 		HugePagesUsed:     n.metrics.HugePagesUsed,
@@ -124,8 +142,27 @@ func (n *Node) Metrics() Metrics {
 	}
 
 	copy(result.HostDisks, n.metrics.HostDisks)
+	if n.metrics.ResourceAdmission != nil {
+		report := n.metrics.ResourceAdmission.Clone()
+		result.ResourceAdmission = &report
+	}
 
 	return result
+}
+
+// AdmissionView reads the authoritative report and conservative local overlays
+// together. Sync replaces the report and retires successes under this same lock.
+func (n *Node) AdmissionView() (*resourceadmission.Report, time.Time, resourceadmission.Resources, error) {
+	n.metricsMu.RLock()
+	defer n.metricsMu.RUnlock()
+	pending, err := n.PlacementMetrics.pendingResources()
+	var report *resourceadmission.Report
+	if n.metrics.ResourceAdmission != nil {
+		cloned := n.metrics.ResourceAdmission.Clone()
+		report = &cloned
+	}
+
+	return report, n.metrics.AdmissionRequestedAt, pending, err
 }
 
 func (n *Node) GetAPIMetric() api.NodeMetrics {
