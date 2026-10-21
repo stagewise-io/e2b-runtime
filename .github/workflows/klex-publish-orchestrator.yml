@@ -1,0 +1,188 @@
+# Klex fork only. Publishes host binaries as an ECR artifact image, not a
+# replacement for the supervised host process. Uses the same protected
+# environments and AWS_ECR_* variables as klex-publish-api.yml.
+name: Klex Publish Orchestrator
+
+on:
+  pull_request:
+    paths:
+      - packages/orchestrator/**
+      - packages/shared/**
+      - packages/clickhouse/**
+      - .github/workflows/klex-publish-orchestrator.yml
+  push:
+    branches:
+      - klex/main
+    paths:
+      - packages/orchestrator/**
+      - packages/shared/**
+      - packages/clickhouse/**
+      - .github/workflows/klex-publish-orchestrator.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options:
+          - preview
+          - production
+        default: preview
+
+permissions:
+  contents: read
+
+concurrency:
+  group: klex-publish-orchestrator-${{ github.event_name == 'pull_request' && github.ref || inputs.environment || 'preview' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify host binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve build metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          base_version="$(sed -n 's/^var Version = "\([^"]*\)".*/\1/p' packages/orchestrator/pkg/version/main.go)"
+          [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'unexpected orchestrator base version' >&2; exit 1; }
+          commit_sha="$(git rev-parse --short=12 HEAD)"
+          {
+            # Build metadata preserves the base version's feature-gate ordering.
+            echo "version=$base_version+klex.$commit_sha"
+            echo "tag=klex-$commit_sha"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
+
+      - name: Build host-binary bundle
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: packages
+          file: packages/orchestrator/Dockerfile
+          target: klex-artifacts
+          platforms: linux/amd64
+          outputs: type=local,dest=release
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=klex-orchestrator
+          cache-to: type=gha,mode=max,scope=klex-orchestrator
+
+      - name: Verify bundle metadata and checksums
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release
+          test -x orchestrator
+          test -x clean-nfs-cache
+          sha256sum -c SHA256SUMS
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg version "$EXPECTED_VERSION" \
+            '.schema_version == 1 and .commit == $commit and .version == $version and .os == "linux" and .arch == "amd64"' release.json
+
+  publish:
+    name: Publish orchestrator (${{ inputs.environment || 'preview' }})
+    needs: build
+    if: github.event_name != 'pull_request' && github.repository == 'stagewise-io/e2b-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment || 'preview' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve artifact repository
+        id: repository
+        env:
+          REPOSITORY_URLS: ${{ vars.AWS_ECR_REPOSITORY_URLS }}
+        run: |
+          set -euo pipefail
+          repository_url="$(jq -er '.orchestrator | select(type == "string" and length > 0)' <<<"$REPOSITORY_URLS")"
+          {
+            echo "url=$repository_url"
+            echo "name=${repository_url#*/}"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@4a1596c86fd706dc0521e32f0121ad1a6d1adb74 # v6
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_ECR_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Check for existing artifact
+        id: existing
+        env:
+          REPOSITORY_NAME: ${{ steps.repository.outputs.name }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if aws ecr describe-images --repository-name "$REPOSITORY_NAME" --image-ids imageTag="$TAG" >existing.json 2>existing.err; then
+            digest="$(jq -er '.imageDetails[0].imageDigest' existing.json)"
+            echo "exists=true" >>"$GITHUB_OUTPUT"
+            echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          elif grep -q '(ImageNotFoundException)' existing.err; then
+            echo "exists=false" >>"$GITHUB_OUTPUT"
+          else
+            cat existing.err >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
+
+      - name: Publish host-binary bundle
+        id: push
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: packages
+          file: packages/orchestrator/Dockerfile
+          target: klex-artifacts
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.repository.outputs.url }}:${{ needs.build.outputs.tag }}
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            VERSION=${{ needs.build.outputs.version }}
+          cache-from: type=gha,scope=klex-orchestrator
+          cache-to: type=gha,mode=max,scope=klex-orchestrator
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.repository.outputs.url }}:${{ needs.build.outputs.tag }}
+          DIGEST: ${{ steps.push.outputs.digest || steps.existing.outputs.digest }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          REUSED: ${{ steps.existing.outputs.exists }}
+        run: |
+          {
+            echo '### Orchestrator host-binary bundle'
+            echo ''
+            echo "- Artifact: \`$IMAGE@$DIGEST\`"
+            echo "- Runtime version: \`$VERSION\`"
+            echo "- Runtime commit: \`$COMMIT\`"
+            echo "- Contents: \`orchestrator\`, \`clean-nfs-cache\`, \`SHA256SUMS\`, \`release.json\`"
+            echo "- Reused existing artifact: \`$REUSED\`"
+            echo '- Publication does not install or restart any runtime.'
+          } >>"$GITHUB_STEP_SUMMARY"

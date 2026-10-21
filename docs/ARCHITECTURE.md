@@ -1176,6 +1176,38 @@ flowchart TB
   flag's fallback where LaunchDarkly has no value). Once reads are on ClickHouse, Loki can be left
   out of a deployment and the api started without `LOKI_URL`.
 
+### Klex fork publication
+
+The Klex fork publishes its patched API image through
+`.github/workflows/klex-publish-api.yml`. The separate
+`.github/workflows/klex-publish-orchestrator.yml` builds and checks the host
+binaries on pull requests without AWS credentials, then publishes on `klex/main`
+pushes to preview or by manual dispatch to preview/production. Publication uses
+the same protected GitHub environments, AWS OIDC role and `AWS_ECR_*` variables
+as the API publisher. The infra-owned repository map must include `orchestrator`.
+
+The orchestrator image is an artifact bundle, not a runnable replacement for the
+host process. The `klex-artifacts` Docker target contains `/orchestrator`,
+`/clean-nfs-cache`, `/SHA256SUMS`, and `/release.json`. It uses the existing
+CGO-enabled Bookworm builder. The build checks the embedded commit/version and
+dynamic-library resolution before packaging. The original `artifacts` target
+and default runtime image are unchanged.
+
+Tags are `klex-<12-character-commit>` and ECR enforces immutability. The embedded
+version is the source's base version with `+klex.<12-character-commit>` build
+metadata, preserving semantic-version feature gates. Both the binary and release
+metadata carry the full source commit. Re-publishing an existing tag reuses its
+digest. Other ECR lookup errors fail publication instead of being treated as a
+missing tag. Deployment must pin the image digest, verify extracted binaries
+against `SHA256SUMS`, and match the supervisor's expected version and commit to
+`release.json`. Tagged orchestrator bundles must remain available for host
+replacement and rollback.
+
+Publishing does not install binaries, restart hosts, change GitOps pins, or enable
+resource admission. Host installation and the mixed-version supervisor transition
+require separate infra/GitOps changes. Until those are deployed, hosts keep using
+their existing upstream binary.
+
 ## Repository layout
 
 ```
