@@ -330,8 +330,10 @@ func (s *Server) admitPauseDisk(ctx context.Context, sbx *sandbox.Sandbox, files
 	return reservation, nil
 }
 
-// Failed conservatively retains enabled estimates when snapshot rollback cannot
-// establish that all deferred writers have stopped. Legacy behavior is unchanged.
+// Failed retains enabled estimates for every snapshot setup error: the error
+// contract provides no proof that all deferred writers have stopped. This can
+// block node admission until drain/restart even on a pre-write failure, but a
+// request ending is not proof of safe rollback. Legacy behavior is unchanged.
 func (r *pauseDiskReservation) Failed(err error) {
 	if r == nil {
 		return

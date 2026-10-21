@@ -126,6 +126,31 @@ func TestResourceAdmissionCapabilityVersusCapacity(t *testing.T) {
 	require.Equal(t, legacy.ID, result.Node.ID)
 }
 
+func TestResourceAdmissionRejectsInvalidBuildResources(t *testing.T) {
+	t.Parallel()
+	for _, res := range []nodemanager.SandboxResources{{CPUs: 0, MiBDisk: 1}, {CPUs: 1, MiBDisk: 0}, {CPUs: 1, MiBDisk: -1}, {CPUs: 1, MiBDisk: math.MaxInt64}} {
+		t.Run(fmt.Sprintf("cpu=%d/disk=%d", res.CPUs, res.MiBDisk), func(t *testing.T) {
+			t.Parallel()
+			n := admissionNode("n", admissionReport(), time.Now())
+			n.SetSandboxClient(failingCreateClient(t))
+			req := testSbxRequest("s")
+			req.Sandbox.Vcpu, req.Sandbox.TotalDiskSizeMb = res.CPUs, res.MiBDisk
+			_, err := PlaceSandbox(t.Context(), NewBestOfK(DefaultBestOfKConfig()), []*nodemanager.Node{n}, n, req, Requirements{ResourceAdmission: true}, false, nil)
+			require.ErrorAs(t, err, &InvalidResourceRequestError{})
+		})
+	}
+}
+
+func TestResourceAdmissionDisabledAllowsLegacyMissingDiskSize(t *testing.T) {
+	t.Parallel()
+	n := admissionNode("n", admissionReport(), time.Now())
+	req := testSbxRequest("s")
+	req.Sandbox.TotalDiskSizeMb = 0
+	result, err := PlaceSandbox(t.Context(), NewBestOfK(DefaultBestOfKConfig()), []*nodemanager.Node{n}, n, req, Requirements{}, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, n.ID, result.Node.ID)
+}
+
 func TestResourceAdmissionFinalCheckSerializesPending(t *testing.T) {
 	t.Parallel()
 	r := admissionReport()

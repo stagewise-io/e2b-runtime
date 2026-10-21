@@ -83,7 +83,7 @@ func TestDisableLegacyTeamMutationsFlagFallback(t *testing.T) {
 	assert.False(t, client.BoolFlag(t.Context(), DisableLegacyTeamMutationsFlag))
 }
 
-func TestResourceAdmissionPlacementDefaultDisabled(t *testing.T) {
+func TestResourceAdmissionPlacementFlagFallback(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClientWithDatasource(ldtestdata.DataSource())
@@ -92,7 +92,7 @@ func TestResourceAdmissionPlacementDefaultDisabled(t *testing.T) {
 		require.NoError(t, client.Close(context.WithoutCancel(t.Context())))
 	})
 
-	assert.False(t, client.BoolFlag(t.Context(), PlacementResourceAdmission))
+	assert.Equal(t, PlacementResourceAdmission.Fallback(), client.BoolFlag(t.Context(), PlacementResourceAdmission))
 }
 
 // Guards the default map shipped in this package: every entry's key must be
