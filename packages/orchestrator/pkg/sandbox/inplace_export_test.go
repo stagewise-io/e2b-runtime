@@ -200,7 +200,8 @@ func TestRunInPlaceRootfsExport_SealFailureRecovers(t *testing.T) {
 	diffPromise := utils.NewSetOnce[build.Diff]()
 	sealDone := utils.NewSetOnce[struct{}]()
 
-	s.runInPlaceRootfsExport(t.Context(), sealCache, buildID, blockSize, meta, diffPromise, sealDone)
+	require.NoError(t, s.runInPlaceRootfsExport(t.Context(), sealCache, buildID, blockSize, meta, diffPromise, sealDone),
+		"confirmed fold-back must not report an admission cleanup failure")
 
 	// The checkpoint's artifact is lost, tagged as the permanent seal failure.
 	_, diffErr := diffPromise.Result()
@@ -224,6 +225,32 @@ func TestRunInPlaceRootfsExport_SealFailureRecovers(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, folded.Close())
 	_ = nextSeal
+}
+
+func TestDeferredRootfsCreateFailureConfirmsWriterCleanup(t *testing.T) {
+	t.Parallel()
+	blockSize := int64(header.PageSize)
+	sealCache, err := block.NewCache(blockSize, blockSize, t.TempDir()+"/seal", false)
+	require.NoError(t, err)
+	meta, err := sealCache.DiffMetadata()
+	require.NoError(t, err)
+	s := &Sandbox{
+		Metadata: &Metadata{},
+		config:   cfg.BuilderConfig{DefaultCacheDir: t.TempDir() + "/missing"},
+	}
+	promise := utils.NewSetOnce[build.Diff]()
+	cleanup := NewCleanup()
+	cleanup.snapshotWriters.start(func() error {
+		return s.runDeferredRootfsExport(t.Context(), sealCache, uuid.New(), blockSize, meta, promise)
+	})
+	cleanup.snapshotWriters.seal()
+	snapshot := &Snapshot{
+		cleanup:    cleanup,
+		RootfsDiff: build.NewDeferredDiff("test-rootfs", blockSize, promise),
+	}
+	require.NoError(t, snapshot.WaitForWrites(t.Context()))
+	_, err = promise.Result()
+	require.ErrorIs(t, err, build.ErrDeferredSealFailed, "artifact failure remains visible after safe cleanup")
 }
 
 // TestRunInPlaceRootfsExport_RepeatedCycles pins the repeated-checkpoint

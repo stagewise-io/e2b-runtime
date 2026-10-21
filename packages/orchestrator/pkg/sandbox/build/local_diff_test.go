@@ -4,6 +4,8 @@ package build
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,6 +36,23 @@ func TestLocalDiffFileCloseToDiffRemovesPartialOnError(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, diff)
 	require.NoFileExists(t, cachePath, "partial diff file must be removed on materialization failure")
+	var failure *DiffCleanupError
+	require.ErrorAs(t, err, &failure)
+	require.NoError(t, failure.CleanupErr, "already-closed file and successful removal prove cleanup")
+}
+
+func TestLocalDiffFileCloseToDiffReportsCleanupFailure(t *testing.T) {
+	t.Parallel()
+	f, err := NewLocalDiffFile(t.TempDir(), "build-test-id", Rootfs)
+	require.NoError(t, err)
+	require.NoError(t, f.File.Close())
+	// A nonempty directory cannot be removed by the partial-file cleanup.
+	f.cachePath = t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(f.cachePath, "retained"), nil, 0o600))
+	_, err = f.CloseToDiff(blockSize)
+	var failure *DiffCleanupError
+	require.ErrorAs(t, err, &failure)
+	require.Error(t, failure.CleanupErr)
 }
 
 // TestLocalDiffFileCloseToDiffRemovesEmptyCacheFile verifies the zero-size NoDiff

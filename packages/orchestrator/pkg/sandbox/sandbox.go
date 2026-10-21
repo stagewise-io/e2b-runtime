@@ -4042,7 +4042,7 @@ func (s *Sandbox) sealCacheToDiff(
 ) error {
 	diffFile, err := build.NewLocalDiffFile(s.config.DefaultCacheDir, buildID.String(), build.Rootfs)
 	if err != nil {
-		return s.failRootfsSeal(diffPromise, fmt.Errorf("create rootfs diff file: %w", err))
+		return s.failRootfsSeal(diffPromise, snapshotFailure(fmt.Errorf("create rootfs diff file: %w", err), nil))
 	}
 
 	// Export using the metadata captured at setup so the sealed data matches the
@@ -4054,7 +4054,12 @@ func (s *Sandbox) sealCacheToDiff(
 
 	diff, err := diffFile.CloseToDiff(blockSize)
 	if err != nil {
-		return s.failRootfsSeal(diffPromise, fmt.Errorf("materialize rootfs diff: %w", err))
+		cleanupErr := err
+		if failure, ok := errors.AsType[*build.DiffCleanupError](err); ok {
+			cleanupErr = failure.CleanupErr
+		}
+
+		return s.failRootfsSeal(diffPromise, snapshotFailure(fmt.Errorf("materialize rootfs diff: %w", err), cleanupErr))
 	}
 
 	if err := diffPromise.SetValue(diff); err != nil {

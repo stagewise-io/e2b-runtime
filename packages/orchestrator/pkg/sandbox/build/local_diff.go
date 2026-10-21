@@ -4,6 +4,7 @@ package build
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -51,21 +52,35 @@ func (f *LocalDiffFile) Close() error {
 	return nil
 }
 
+// DiffCleanupError preserves a materialization failure and the separate outcome
+// of closing and removing its unpublished file.
+type DiffCleanupError struct {
+	Err        error
+	CleanupErr error
+}
+
+func (e *DiffCleanupError) Error() string { return e.Err.Error() }
+func (e *DiffCleanupError) Unwrap() error { return e.Err }
+
 func (f *LocalDiffFile) CloseToDiff(
 	blockSize int64,
 ) (d Diff, e error) {
-	defer f.File.Close()
-
-	// On any failure to produce a usable Diff (e.g. a stat error after the bytes
-	// were written), remove the partial cache file. Nothing registers it in
-	// the DiffStore, so otherwise it orphans in the cache dir until process restart
-	// — disk-pressure eviction can't reclaim a file it doesn't know about.
+	// Unpublished files have no DiffStore owner. Keep their cleanup outcome
+	// separate so callers can distinguish artifact failure from unsafe teardown.
 	defer func() {
-		if e != nil {
-			if rmErr := os.Remove(f.cachePath); rmErr != nil && !os.IsNotExist(rmErr) {
-				e = fmt.Errorf("%w; remove partial diff file: %w", e, rmErr)
-			}
+		closeErr := f.File.Close()
+		if errors.Is(closeErr, os.ErrClosed) {
+			closeErr = nil
 		}
+		if e == nil {
+			return
+		}
+		rmErr := os.Remove(f.cachePath)
+		if os.IsNotExist(rmErr) {
+			rmErr = nil
+		}
+		cleanupErr := errors.Join(closeErr, rmErr)
+		e = &DiffCleanupError{Err: errors.Join(e, cleanupErr), CleanupErr: cleanupErr}
 	}()
 
 	// No sync: cache files are never read after a crash, and every reader goes through the page cache.
