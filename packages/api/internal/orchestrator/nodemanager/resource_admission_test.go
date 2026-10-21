@@ -60,6 +60,27 @@ func TestAdmissionSuccessOverlayRetiresOnlyAfterNewRequest(t *testing.T) {
 	require.Zero(t, pending)
 }
 
+func TestAdmissionLegacyOverlayKeepsCPUWithoutPoisoningDisk(t *testing.T) {
+	t.Parallel()
+	for _, succeeded := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending", true: "successful"}[succeeded], func(t *testing.T) {
+			t.Parallel()
+			n := NewTestNode("n", "ready", 0, 8)
+			n.UpdateMetricsFromSync(admissionInfo(), time.Now())
+			legacy := n.PlacementMetrics.BeginPlacingIf("legacy", SandboxResources{CPUs: 2}, func() bool { return true })
+			if succeeded {
+				legacy.Success()
+			}
+			valid := n.PlacementMetrics.BeginPlacingIf("valid", SandboxResources{CPUs: 3, MiBDisk: 100}, func() bool { return true })
+			_, _, pending, err := n.AdmissionView()
+			require.NoError(t, err)
+			require.Equal(t, resourceadmission.Resources{CPUs: 5, DiskBytes: 100 * resourceadmission.MiB}, pending)
+			valid.Fail()
+			legacy.Fail()
+		})
+	}
+}
+
 func TestAdmissionAttemptCompletionCannotRemoveReplacement(t *testing.T) {
 	t.Parallel()
 	n := NewTestNode("n", "ready", 0, 8)

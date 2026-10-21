@@ -2343,11 +2343,18 @@ func (s *Sandbox) Pause(
 	defer span.End()
 
 	cleanup := NewCleanup()
+	// Synchronous calls that fail before transferring their resources to
+	// cleanup may have an unknown writer/cleanup outcome. Never infer that
+	// their returned error alone means rollback completed.
+	cleanupKnown := true
 	defer func() {
-		// Cleanup the snapshot if an error occurs
+		cleanup.snapshotWriters.seal()
 		if e != nil {
-			err := cleanup.Run(ctx)
-			e = errors.Join(e, err)
+			cleanupErr := cleanup.Run(ctx)
+			if !cleanupKnown {
+				cleanupErr = errors.Join(cleanupErr, snapshotCleanupError(ctx, e))
+			}
+			e = snapshotFailure(e, cleanupErr)
 		}
 	}()
 
@@ -2631,10 +2638,13 @@ func (s *Sandbox) Pause(
 	// CreateSnapshot also drains and flushes the virtio disk in our custom FC, so
 	// it runs even for a filesystem-only pause (which needs the disk flush); the
 	// resulting snapfile is just not uploaded in that case.
+	cleanupKnown = false
 	err = s.process.CreateSnapshot(ctx, snapfile.Path())
 	if err != nil {
+		// A failed FC round-trip does not prove its snapfile writer stopped.
 		return nil, fmt.Errorf("error creating snapshot: %w", err)
 	}
+	cleanupKnown = true
 
 	// Gather data for postprocessing
 	originalRootfs, err := s.Template.Rootfs()
@@ -2655,10 +2665,12 @@ func (s *Sandbox) Pause(
 	// invoked after the guest has resumed in place (next to startSeal).
 	var startMemSeal func(context.Context)
 	if !pauseOpts.filesystemSnapshot {
+		cleanupKnown = false
 		mem, startMemSeal, err = s.processMemorySnapshot(ctx, buildID, pauseOpts.maintainSandbox, cleanup)
 		if err != nil {
 			return nil, err
 		}
+		cleanupKnown = true
 		memExportDeferred = startMemSeal != nil
 	}
 	var (
@@ -2670,6 +2682,7 @@ func (s *Sandbox) Pause(
 		startSeal func(context.Context)
 	)
 
+	cleanupKnown = false
 	rootfsDiff, rootfsHeader, startSeal, err = s.processRootfsSnapshot(
 		ctx,
 		buildID,
@@ -2680,6 +2693,7 @@ func (s *Sandbox) Pause(
 	if err != nil {
 		return nil, fmt.Errorf("error while post processing: %w", err)
 	}
+	cleanupKnown = true
 
 	rootfsDiffHeader := NewResolvedDiffHeader(rootfsHeader)
 	// Derive scheduling metadata synchronously so Pause never blocks on the
@@ -3264,7 +3278,9 @@ func (s *Sandbox) setupDeferredMemoryExport(
 		s.memSealDone = sealDone
 		s.memSealMu.Unlock()
 
-		go s.runDeferredMemoryExport(sealCtx, window, ce, cache, buildID, diffPromise, sealDone, fprPaused)
+		cleanup.snapshotWriters.start(func() error {
+			return s.runDeferredMemoryExport(sealCtx, window, ce, cache, buildID, diffPromise, sealDone, fprPaused)
+		})
 	}
 
 	return mem, startMemSeal, nil
@@ -3284,7 +3300,7 @@ func (s *Sandbox) runDeferredMemoryExport(
 	diffPromise *utils.SetOnce[build.Diff],
 	sealDone *utils.SetOnce[struct{}],
 	fprPaused bool,
-) {
+) (cleanupErr error) {
 	ctx, span := tracer.Start(ctx, "deferred-memory-export")
 	defer span.End()
 
@@ -3331,6 +3347,7 @@ func (s *Sandbox) runDeferredMemoryExport(
 		// already canceled on every path into fail.
 		window.CancelAndDrain(err)
 		if closeErr := cache.Close(); closeErr != nil {
+			cleanupErr = closeErr
 			sbxlogger.I(s).Warn(ctx, "closing memory export cache",
 				zap.String("build_id", buildID.String()), zap.Error(closeErr))
 		}
@@ -3353,27 +3370,29 @@ func (s *Sandbox) runDeferredMemoryExport(
 	if err != nil {
 		fail(err)
 
-		return
+		return cleanupErr
 	}
 
 	diff, err := build.NewLocalDiffFromCache(build.GetDiffStoreKey(buildID.String(), build.Memfile), cache)
 	if err != nil {
 		fail(fmt.Errorf("materialize memory diff: %w", err))
 
-		return
+		return cleanupErr
 	}
 
 	if err := diffPromise.SetValue(diff); err != nil {
 		// The promise was already settled (pause aborted); drop the diff so
 		// its cache file doesn't leak. The window is fully released, so the
 		// occupancy signal resolves success (see fail above).
-		_ = diff.Close()
+		cleanupErr = diff.Close()
 		_ = sealDone.SetValue(struct{}{})
 
-		return
+		return cleanupErr
 	}
 	_ = sealDone.SetValue(struct{}{})
 	telemetry.ReportEvent(ctx, "memfile diff captured (deferred CoW)")
+
+	return nil
 }
 
 // resumeFreePageReportingBestEffort re-enables balloon free-page reporting
@@ -3968,7 +3987,9 @@ func (s *Sandbox) setupDeferredRootfsExport(
 
 	startSeal = func(sealCtx context.Context) {
 		started.Store(true)
-		go s.runDeferredRootfsExport(sealCtx, sealCache, buildID, prep.blockSize, prep.diffMetadata, diffPromise)
+		cleanup.snapshotWriters.start(func() error {
+			return s.runDeferredRootfsExport(sealCtx, sealCache, buildID, prep.blockSize, prep.diffMetadata, diffPromise)
+		})
 	}
 
 	return rootfsDiff, prep.rootfsHeader, startSeal, nil
@@ -3985,7 +4006,7 @@ func (s *Sandbox) runDeferredRootfsExport(
 	blockSize int64,
 	meta *header.DiffMetadata,
 	diffPromise *utils.SetOnce[build.Diff],
-) {
+) error {
 	ctx, span := tracer.Start(ctx, "deferred-rootfs-export")
 	defer span.End()
 
@@ -4001,9 +4022,12 @@ func (s *Sandbox) runDeferredRootfsExport(
 
 	// The sandbox is torn down; the ejected cache is ours to close regardless of
 	// the export outcome.
-	if err := sealCache.Close(); err != nil {
-		s.log().Warn(ctx, "closing ejected rootfs cache", zap.Error(err))
+	closeErr := sealCache.Close()
+	if closeErr != nil {
+		s.log().Warn(ctx, "closing ejected rootfs cache", zap.Error(closeErr))
 	}
+
+	return errors.Join(snapshotCleanupError(ctx, err), closeErr)
 }
 
 // sealCacheToDiff reflinks the frozen cache into a fresh local diff file and
@@ -4024,7 +4048,7 @@ func (s *Sandbox) sealCacheToDiff(
 	// Export using the metadata captured at setup so the sealed data matches the
 	// header built from the same bitmap read (rather than re-reading the tracker).
 	if _, err := sealCache.ExportToDiffWithMetadata(ctx, diffFile.File, meta); err != nil {
-		return s.failRootfsSeal(diffPromise, errors.Join(fmt.Errorf("export rootfs diff: %w", err), diffFile.Close()))
+		return s.failRootfsSeal(diffPromise, snapshotFailure(fmt.Errorf("export rootfs diff: %w", err), diffFile.Close()))
 	}
 	telemetry.ReportEvent(ctx, "exported rootfs")
 
@@ -4036,7 +4060,7 @@ func (s *Sandbox) sealCacheToDiff(
 	if err := diffPromise.SetValue(diff); err != nil {
 		// The promise was already settled (pause aborted); drop the diff so its
 		// cache file doesn't leak.
-		return errors.Join(err, diff.Close())
+		return snapshotFailure(err, diff.Close())
 	}
 
 	return nil
@@ -4387,7 +4411,9 @@ func (s *Sandbox) setupInPlaceRootfsExport(
 
 	startSeal = func(sealCtx context.Context) {
 		started.Store(true)
-		go s.runInPlaceRootfsExport(sealCtx, sealCache, buildID, prep.blockSize, prep.diffMetadata, diffPromise, sealDone)
+		cleanup.snapshotWriters.start(func() error {
+			return s.runInPlaceRootfsExport(sealCtx, sealCache, buildID, prep.blockSize, prep.diffMetadata, diffPromise, sealDone)
+		})
 	}
 
 	return rootfsDiff, prep.rootfsHeader, startSeal, nil
@@ -4407,7 +4433,7 @@ func (s *Sandbox) runInPlaceRootfsExport(
 	meta *header.DiffMetadata,
 	diffPromise *utils.SetOnce[build.Diff],
 	sealDone *utils.SetOnce[struct{}],
-) {
+) error {
 	ctx, span := tracer.Start(ctx, "in-place-rootfs-export")
 	defer span.End()
 
@@ -4429,11 +4455,11 @@ func (s *Sandbox) runInPlaceRootfsExport(
 			s.log().Error(ctx, "in-place rootfs export fold-back failed", zap.Error(foldErr))
 			_ = sealDone.SetError(fmt.Errorf("%w; folding the seal back also failed: %w", err, foldErr))
 
-			return
+			return errors.Join(snapshotCleanupError(ctx, err), foldErr)
 		}
 		_ = sealDone.SetValue(struct{}{})
 
-		return
+		return snapshotCleanupError(ctx, err)
 	}
 	telemetry.ReportEvent(ctx, "rootfs diff sealed (in-place)")
 
@@ -4444,16 +4470,20 @@ func (s *Sandbox) runInPlaceRootfsExport(
 		s.log().Error(ctx, "folding sealed rootfs cache failed", zap.Error(err))
 		_ = sealDone.SetError(fmt.Errorf("fold sealed rootfs cache: %w", err))
 
-		return
+		return err
 	}
+	var closeErr error
 	if detached != nil {
-		if closeErr := detached.Close(); closeErr != nil {
+		closeErr = detached.Close()
+		if closeErr != nil {
 			s.log().Warn(ctx, "closing folded rootfs cache", zap.Error(closeErr))
 		}
 	}
 
 	telemetry.ReportEvent(ctx, "rootfs seal folded")
 	_ = sealDone.SetValue(struct{}{})
+
+	return closeErr
 }
 
 // createCgroup creates the sandbox's cgroup, which the caller removes. Without one Firecracker runs

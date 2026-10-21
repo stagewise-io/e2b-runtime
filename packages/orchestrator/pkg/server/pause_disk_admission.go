@@ -330,10 +330,9 @@ func (s *Server) admitPauseDisk(ctx context.Context, sbx *sandbox.Sandbox, files
 	return reservation, nil
 }
 
-// Failed retains enabled estimates for every snapshot setup error: the error
-// contract provides no proof that all deferred writers have stopped. This can
-// block node admission until drain/restart even on a pre-write failure, but a
-// request ending is not proof of safe rollback. Legacy behavior is unchanged.
+// Failed retains enabled estimates when writer or cleanup state is unknown.
+// Known pre-write failures and confirmed cleanup use finishFailedSnapshotWrites
+// instead. A request ending alone never proves that rollback completed.
 func (r *pauseDiskReservation) Failed(err error) {
 	if r == nil {
 		return
@@ -349,6 +348,31 @@ func (s *Server) admitCheckpointDisk(ctx context.Context, sbx *sandbox.Sandbox, 
 	}
 
 	return s.admitSnapshotWrites(ctx, sbx, filesystemOnly)
+}
+
+// finishFailedSnapshotWrites owns the reservation on an unsuccessful capture.
+// Explicit completion proof permits release; an unknown or failed cleanup keeps
+// the node fail-closed. The wait outlives the RPC and participates in node drain.
+func (s *Server) finishFailedSnapshotWrites(ctx context.Context, r *pauseDiskReservation, err error) {
+	if r == nil {
+		return
+	}
+	var failure *sandbox.SnapshotError
+	if !errors.As(err, &failure) || failure.WaitCleanup == nil {
+		r.Failed(err)
+		r.Release()
+
+		return
+	}
+	releaseWork := s.info.TrackWork()
+	go func() {
+		defer releaseWork()
+		cleanupErr := failure.WaitCleanup(context.WithoutCancel(ctx))
+		if cleanupErr != nil {
+			r.Failed(cleanupErr)
+		}
+		r.Release()
+	}()
 }
 
 // admitSnapshotWrites uses the create ledger even when legacy pause admission
@@ -401,14 +425,18 @@ func (s *Server) bindSnapshotWrites(ctx context.Context, res *snapshotResult, r 
 		// Join every writer even when an earlier seal failed. The harvest
 		// waiter returns on the first failure and cannot establish that.
 		var sealErr error
-		if res.memoryExportDeferred && res.waitMemorySealed != nil {
-			sealErr = res.waitMemorySealed(ctx)
-		}
-		_, rootfsErr := res.rootfsDiff.CachePath(ctx)
-		sealErr = errors.Join(sealErr, rootfsErr)
-		if res.memoryDiff != nil {
-			_, memoryErr := res.memoryDiff.CachePath(ctx)
-			sealErr = errors.Join(sealErr, memoryErr)
+		if res.waitWrites != nil {
+			sealErr = res.waitWrites(ctx)
+		} else {
+			if res.memoryExportDeferred && res.waitMemorySealed != nil {
+				sealErr = res.waitMemorySealed(ctx)
+			}
+			_, rootfsErr := res.rootfsDiff.CachePath(ctx)
+			sealErr = errors.Join(sealErr, rootfsErr)
+			if res.memoryDiff != nil {
+				_, memoryErr := res.memoryDiff.CachePath(ctx)
+				sealErr = errors.Join(sealErr, memoryErr)
+			}
 		}
 		if sealErr != nil {
 			r.Failed(sealErr)

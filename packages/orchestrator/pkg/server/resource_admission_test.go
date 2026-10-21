@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/build"
+	sbxtemplate "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/template"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/template/metadata"
 	"github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
 	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
@@ -154,6 +156,71 @@ func TestResourceSnapshotWritesWaitForSealAndUpload(t *testing.T) {
 	}
 }
 
+func TestResourceSnapshotFailureWaitsForCleanupProof(t *testing.T) {
+	t.Parallel()
+	for _, cleanupFails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "confirmed", true: "failed"}[cleanupFails], func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				s := diskAdmissionTestServer(t, -1, 0)
+				c := snapshotAdmissionController(t, false, 8)
+				s.sandboxFactory.Admission = c
+				r, err := s.admitPauseDisk(t.Context(), diskAdmissionSandbox(t, "cleanup-proof", 50, 1024), false)
+				require.NoError(t, err)
+				done := make(chan struct{})
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				s.finishFailedSnapshotWrites(ctx, r, &sandbox.SnapshotError{
+					Err: errors.New("capture failed"),
+					WaitCleanup: func(ctx context.Context) error {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						<-done
+						if cleanupFails {
+							return errors.New("cleanup unconfirmed")
+						}
+
+						return nil
+					},
+				})
+				synctest.Wait()
+				require.Positive(t, reservedSnapshotBytes(c))
+				require.Positive(t, s.info.OutstandingWork())
+				require.False(t, c.Report().Uncertain)
+				close(done)
+				synctest.Wait()
+				require.Zero(t, s.info.OutstandingWork())
+				require.Equal(t, cleanupFails, c.Report().Uncertain)
+				if cleanupFails {
+					require.Positive(t, reservedSnapshotBytes(c))
+				} else {
+					require.Zero(t, reservedSnapshotBytes(c))
+				}
+			})
+		})
+	}
+}
+
+func TestResourceSnapshotPreWriteFailureReleases(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := diskAdmissionTestServer(t, -1, 0)
+		c := snapshotAdmissionController(t, false, 8)
+		s.sandboxFactory.Admission = c
+		r, err := s.admitCheckpointDisk(t.Context(), diskAdmissionSandbox(t, "pre-write", 51, 1024), false)
+		require.NoError(t, err)
+		s.finishFailedSnapshotWrites(t.Context(), r, &sandbox.SnapshotError{
+			Err:         errors.New("metadata missing before capture"),
+			WaitCleanup: func(context.Context) error { return nil },
+		})
+		synctest.Wait()
+		require.Zero(t, reservedSnapshotBytes(c))
+		require.False(t, c.Report().Uncertain)
+		require.Zero(t, s.info.OutstandingWork())
+	})
+}
+
 func TestResourceSnapshotFailureRetainsUncertainWrites(t *testing.T) {
 	t.Parallel()
 	s := diskAdmissionTestServer(t, -1, 0)
@@ -161,8 +228,7 @@ func TestResourceSnapshotFailureRetainsUncertainWrites(t *testing.T) {
 	s.sandboxFactory.Admission = c
 	r, err := s.admitCheckpointDisk(t.Context(), diskAdmissionSandbox(t, "failed-snapshot", 43, 1024), false)
 	require.NoError(t, err)
-	r.Failed(errors.New("snapshot workers may still be active"))
-	r.Release()
+	s.finishFailedSnapshotWrites(t.Context(), r, errors.New("snapshot workers may still be active"))
 	require.True(t, c.Report().Uncertain)
 	require.Positive(t, reservedSnapshotBytes(c))
 }
@@ -308,6 +374,44 @@ func TestResourceInPlaceCheckpointRefusesDiskWithoutStopping(t *testing.T) {
 	sbx.EndCheckpoint()
 	require.Zero(t, c.Report().CPUCommitted)
 	require.Zero(t, reservedSnapshotBytes(c))
+}
+
+type capacityRefusingCheckpointSteps struct {
+	*slowResumeSteps
+
+	reason resourceadmission.Reason
+}
+
+func (f capacityRefusingCheckpointSteps) resume(context.Context, sbxtemplate.Template, *sandbox.Sandbox) (*sandbox.Sandbox, error) {
+	return nil, &resourceadmission.RefusalError{Reason: f.reason}
+}
+
+func TestResourceCheckpointLateRefusalIsFatalWithDetails(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []resourceadmission.Reason{resourceadmission.CPU, resourceadmission.LogicalDisk, resourceadmission.PhysicalDisk} {
+		t.Run(string(reason), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				s, sbx, steps, _ := slowResumeServer(t)
+				_, err := s.checkpointResumeFreshWith(t.Context(), capacityRefusingCheckpointSteps{steps, reason}, sbx,
+					&orchestrator.SandboxCheckpointRequest{SandboxId: sbx.Runtime.SandboxID}, func() {})
+				require.Equal(t, codes.Internal, status.Code(err), "the original sandbox cannot be restored to Running")
+				details := status.Convert(err).Details()
+				require.Len(t, details, 1)
+				detail, ok := details[0].(*errdetails.ErrorInfo)
+				require.True(t, ok)
+				require.Equal(t, "e2b.orchestrator", detail.GetDomain())
+				require.Equal(t, "RESOURCE_ADMISSION_"+strings.ToUpper(string(reason)), detail.GetReason())
+				require.Empty(t, detail.GetMetadata())
+				synctest.Wait()
+				_, live := s.sandboxFactory.Sandboxes.Get(sbx.Runtime.SandboxID)
+				require.False(t, live)
+				require.Positive(t, steps.stopAndCloses.Load())
+				require.Equal(t, int32(1), steps.asyncStops.Load())
+				require.Zero(t, s.info.OutstandingWork())
+			})
+		})
+	}
 }
 
 func TestResourceAdmissionStatusDetails(t *testing.T) {

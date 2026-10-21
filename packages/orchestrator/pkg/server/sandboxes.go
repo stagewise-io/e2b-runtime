@@ -1253,7 +1253,8 @@ func (s *Server) Pause(ctx context.Context, in *orchestrator.SandboxPauseRequest
 	// Fire and forget - upload completes in the background
 	res, err := s.snapshotAndCacheSandbox(ctx, sbx, in.GetBuildId(), map[string]string{storage.ObjectMetadataTemplateID: in.GetTemplateId()}, storage.ObjectOriginPause, in.GetFilesystemOnly(), deferRootfsExport, false)
 	if err != nil {
-		diskReservation.Failed(err)
+		s.finishFailedSnapshotWrites(ctx, diskReservation, err)
+		diskHandedOff = true
 		telemetry.ReportCriticalError(ctx, "error snapshotting sandbox", err, telemetry.WithSandboxID(in.GetSandboxId()))
 
 		return nil, status.Errorf(codes.Internal, "error snapshotting sandbox '%s': %s", in.GetSandboxId(), err)
@@ -1720,7 +1721,8 @@ func (s *Server) checkpointInPlace(ctx context.Context, sbx *sandbox.Sandbox, in
 		true, // maintainSandbox: resume in place
 	)
 	if err != nil {
-		diskReservation.Failed(err)
+		s.finishFailedSnapshotWrites(ctx, diskReservation, err)
+		diskHandedOff = true
 		telemetry.ReportCriticalError(ctx, "error snapshotting sandbox for checkpoint", err, telemetry.WithSandboxID(in.GetSandboxId()))
 
 		// The one path where the orchestrator itself destroyed the sandbox —
@@ -1903,7 +1905,8 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 	err = withContextCause(snapshotCtx, err)
 	cancelSnapshotBudget()
 	if err != nil {
-		diskReservation.Failed(err)
+		s.finishFailedSnapshotWrites(ctx, diskReservation, err)
+		diskHandedOff = true
 		s.reportCheckpointStepError(ctx, "error snapshotting sandbox for checkpoint", err, in.GetSandboxId())
 
 		return nil, status.Errorf(codes.Internal, "error snapshotting sandbox '%s': %s", in.GetSandboxId(), err)
@@ -1943,6 +1946,10 @@ func (s *Server) checkpointResumeFreshWith(callerCtx context.Context, steps resu
 	if err != nil {
 		err = withContextCause(ctx, err)
 		s.reportCheckpointStepError(ctx, "error resuming sandbox after checkpoint", err, in.GetSandboxId())
+
+		if _, refused := errors.AsType[*resourceadmission.RefusalError](err); refused {
+			return nil, resourceAdmissionStatusWithCode(err, codes.Internal, "node resource capacity unavailable during checkpoint replacement")
+		}
 
 		return nil, status.Errorf(codes.Internal, "error resuming sandbox after checkpoint: %s", err)
 	}
@@ -2146,6 +2153,7 @@ type snapshotResult struct {
 	// waitMemorySealed (Snapshot.WaitMemorySealed) settles.
 	memoryExportDeferred bool
 	waitMemorySealed     func(ctx context.Context) error
+	waitWrites           func(ctx context.Context) error
 }
 
 // snapshotAndCacheSandbox creates a snapshot of a sandbox and adds it to the
@@ -2163,7 +2171,10 @@ func (s *Server) snapshotAndCacheSandbox(
 ) (*snapshotResult, error) {
 	meta, err := sbx.Template.Metadata()
 	if err != nil {
-		return nil, fmt.Errorf("no metadata found in template: %w", err)
+		return nil, &sandbox.SnapshotError{
+			Err:         fmt.Errorf("no metadata found in template: %w", err),
+			WaitCleanup: func(context.Context) error { return nil },
+		}
 	}
 
 	meta = meta.SameVersionTemplate(metadata.TemplateMetadata{
@@ -2207,7 +2218,10 @@ func (s *Server) snapshotAndCacheSandbox(
 		snapshot.MemorySnapshot.ProvisionalSwapDone,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("error adding snapshot to template cache: %w", err)
+		return nil, &sandbox.SnapshotError{
+			Err:         fmt.Errorf("error adding snapshot to template cache: %w", err),
+			WaitCleanup: snapshot.WaitForWrites,
+		}
 	}
 
 	// Caller-supplied provenance (e.g. template_id) is forwarded as-is; team and
@@ -2221,7 +2235,10 @@ func (s *Server) snapshotAndCacheSandbox(
 	// failed AddSnapshot doesn't leave an orphan future blocking re-registration.
 	upload, err := sandbox.NewUpload(ctx, s.uploads, snapshot, s.persistence, s.config.StorageConfig.CompressConfig, s.featureFlags, storage.UseCasePause, objectMetadata, finishUpload)
 	if err != nil {
-		return nil, fmt.Errorf("register upload: %w", err)
+		return nil, &sandbox.SnapshotError{
+			Err:         fmt.Errorf("register upload: %w", err),
+			WaitCleanup: snapshot.WaitForWrites,
+		}
 	}
 
 	telemetry.ReportEvent(ctx, "added snapshot to template cache")
@@ -2275,6 +2292,7 @@ func (s *Server) snapshotAndCacheSandbox(
 		memoryDiff:           snapshot.MemorySnapshot.Diff,
 		memoryExportDeferred: snapshot.MemoryExportDeferred,
 		waitMemorySealed:     snapshot.WaitMemorySealed,
+		waitWrites:           snapshot.WaitForWrites,
 	}, nil
 }
 

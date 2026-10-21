@@ -41,11 +41,17 @@ func (s *Server) admitCheckpointReplacement(ctx context.Context, sbx *sandbox.Sa
 
 // resourceAdmissionStatus keeps host capacity details out of customer messages.
 func resourceAdmissionStatus(err error) error {
+	return resourceAdmissionStatusWithCode(err, codes.ResourceExhausted, "node resource capacity unavailable, please retry")
+}
+
+// A replacement refusal after destruction is fatal: ResourceExhausted would
+// make the API restore Running even though the original VM no longer exists.
+func resourceAdmissionStatusWithCode(err error, code codes.Code, message string) error {
 	var refusal *resourceadmission.RefusalError
 	if !errors.As(err, &refusal) {
 		return err
 	}
-	s := status.New(codes.ResourceExhausted, "node resource capacity unavailable, please retry")
+	s := status.New(code, message)
 	detailed, detailErr := s.WithDetails(&errdetails.ErrorInfo{Domain: "e2b.orchestrator", Reason: "RESOURCE_ADMISSION_" + strings.ToUpper(string(refusal.Reason))})
 	if detailErr != nil {
 		return s.Err()
