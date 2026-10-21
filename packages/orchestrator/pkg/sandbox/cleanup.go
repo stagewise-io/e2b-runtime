@@ -21,6 +21,8 @@ import (
 )
 
 type Cleanup struct {
+	snapshotWriters snapshotWriters
+
 	cleanup         []func(ctx context.Context) error
 	priorityCleanup []func(ctx context.Context) error
 	error           error

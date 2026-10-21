@@ -315,9 +315,12 @@ The shared controller exports bounded rejection reasons, commitment and write ga
 and measurement validity. API filtering consumes its versioned limits independently
 of the best-of-K scoring ratio. Enabled placement rejects invalid or missing build
 resource sizes before selecting a node with a non-retryable stored-data error.
-Snapshot setup errors retain write reservations and mark the controller uncertain
-because their error contract does not prove writer completion; recovery requires
-drain/restart with successful reclaim. Both `RESOURCE_ADMISSION_ENABLED` and
+Snapshot setup errors release write reservations only after explicit producer
+completion and cleanup proof, including failures before writers start. Unknown or
+failed cleanup retains reservations and marks the controller uncertain; recovery
+then requires drain/restart with successful reclaim. A capacity refusal during
+replacement resume stays fatal because the original VM is gone, but preserves the
+bounded admission reason in `ErrorInfo`. Both `RESOURCE_ADMISSION_ENABLED` and
 `PLACEMENT_RESOURCE_ADMISSION` default to false. No deployment values are selected or
 changed. The Linux suites do not validate privileged KVM/NBD lifecycles, and API
 short-mode tests skip database integration. See

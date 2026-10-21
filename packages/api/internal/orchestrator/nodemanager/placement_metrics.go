@@ -169,9 +169,19 @@ func (p *PlacementMetrics) pendingResources() (resourceadmission.Resources, erro
 	defer p.accountMu.Unlock()
 	var total resourceadmission.Resources
 	for _, overlay := range p.overlays {
-		res, err := resourceadmission.FromMiB(overlay.resources.CPUs, overlay.resources.MiBDisk)
+		// Legacy flag-off builds may have no total disk size. Preserve their
+		// CPU overlay without letting absent disk metadata poison other teams'
+		// admission views. The node still enforces actual disk on construction.
+		disk := overlay.resources.MiBDisk
+		if disk == 0 {
+			disk = 1
+		}
+		res, err := resourceadmission.FromMiB(overlay.resources.CPUs, disk)
 		if err != nil {
 			return total, err
+		}
+		if overlay.resources.MiBDisk == 0 {
+			res.DiskBytes = 0
 		}
 		total, err = total.Add(res)
 		if err != nil {

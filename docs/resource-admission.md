@@ -109,13 +109,15 @@ copy remains reserved through upload completion or abandonment.
 Upload completion alone cannot release a reservation while deferred memory or
 rootfs writers remain. Every writer is joined, including after another writer
 fails. If completion cannot be established, commitments remain and the controller
-becomes uncertain. Snapshot setup errors currently provide no proof that all
-writers have stopped, so any error returned before ownership transfers to the
-upload retains the write leases and makes the controller uncertain. This is a
-fail-closed availability trade-off, even for errors that occurred before writes
-started. Recovery requires draining and restarting the node with successful
-startup reclaim. Do not clear the latch or release leases merely because the
-request ended. Disabled mode preserves the legacy pause accounting.
+becomes uncertain. Snapshot setup errors carry a separate cleanup completion
+callback. Known pre-write failures release their reservations; other failures
+retain them until the callback confirms cleanup. Deferred producers are joined
+through teardown, not merely until their artifact promises fail. An artifact
+failure with confirmed cleanup does not poison node admission. Unknown or failed
+cleanup still requires draining and restarting the node with successful startup
+reclaim. Artifacts already owned by the template cache are not deleted to recover
+admission. Do not clear the latch or release leases merely because the request
+ended. Disabled mode preserves the legacy pause accounting.
 
 ## Reporting and API integration
 
@@ -146,11 +148,18 @@ Local overlays include CPU and full logical disk. Successful overlays stay until
 a report requested after that success arrives, even if this temporarily counts a
 request twice. Attempt tokens prevent stale completions from deleting newer work
 with the same sandbox ID. API deletion does not subtract authoritative commitments.
-Only physical cleanup on the node releases those commitments. Independent API
-replicas still race, so node admission remains authoritative.
+Only physical cleanup on the node releases those commitments. Legacy flag-off
+placements with zero disk metadata contribute their CPU overlay without invalidating
+the entire admission view. Their unknown disk is enforced by node-side construction,
+not estimated from requested free space. Negative and overflowing metadata still
+invalidates the view. Independent API replicas still race, so node admission remains
+authoritative.
 
 Node refusals use gRPC `ResourceExhausted` with a bounded `ErrorInfo` reason and no
-host quantities. API retries retain the existing jittered backoff and attempt
+host quantities. A late refusal during replacement resume instead retains the
+fatal `Internal` code with the same bounded `ErrorInfo` reason. The original VM
+has already left service; a retryable code would incorrectly restore Running.
+API retries retain the existing jittered backoff and attempt
 accounting. Capacity-only failures use HTTP 503 `sandbox_capacity_unavailable` with
 retryability. An unsupported fleet uses `sandbox_feature_unsupported` without a
 retry hint. Earlier ambiguous create errors are not reclassified as capacity.
@@ -182,10 +191,9 @@ Before enabling either switch:
   Confirm the rootfs, build, template and build-rootfs paths refer to the intended
   filesystems. Verify legacy builds have valid total-rootfs resource metadata.
   Do not infer safe production values from the unit tests.
-- Review the snapshot-error availability cost before enabling enforcement. Any
-  snapshot setup error currently blocks new node admission until drain/restart,
-  even if no writer started. Safe early release requires a stronger rollback
-  completion contract, not an assumption based on the returned error.
+- Review the snapshot-error availability cost before enabling enforcement.
+  Confirmed cleanup permits release, but unknown or failed cleanup still blocks
+  new node admission until drain/restart. Exercise both outcomes on the canary.
 - Deploy compatible artifacts with both switches disabled. Verify the existing
   sandbox lifecycle and legacy live-allocation metrics before enabling admission.
 - Enable node admission on a canary with the chosen policy. Validate host-lock
