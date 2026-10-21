@@ -50,6 +50,30 @@ FROM scratch AS artifacts
 COPY --from=builder /build/orchestrator/bin/clean-nfs-cache .
 COPY --from=builder /build/orchestrator/bin/orchestrator .
 
+# Klex host-binary bundle. Keep `artifacts` and the default runtime image
+# unchanged for upstream callers. Publication selects this target explicitly.
+FROM builder AS klex-release
+
+RUN test -n "$VERSION" \
+    && printf '%s\n' "$COMMIT_SHA" | grep -Eq '^[a-f0-9]{40}$' \
+    && go version -m bin/orchestrator | grep -F -- "-X=main.commitSHA=$COMMIT_SHA" \
+    && go version -m bin/orchestrator | grep -F -- "-X=github.com/e2b-dev/infra/packages/orchestrator/pkg/version.Version=$VERSION" \
+    && ldd bin/orchestrator > /tmp/orchestrator-ldd \
+    && ! grep -q 'not found' /tmp/orchestrator-ldd \
+    && cd bin \
+    && sha256sum orchestrator clean-nfs-cache > SHA256SUMS \
+    && printf '{"schema_version":1,"version":"%s","commit":"%s","os":"linux","arch":"%s"}\n' "$VERSION" "$COMMIT_SHA" "$TARGETARCH" > release.json
+
+FROM artifacts AS klex-artifacts
+
+ARG COMMIT_SHA
+ARG VERSION
+LABEL org.opencontainers.image.source="https://github.com/stagewise-io/e2b-runtime" \
+      org.opencontainers.image.revision="${COMMIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}"
+COPY --from=klex-release /build/orchestrator/bin/SHA256SUMS .
+COPY --from=klex-release /build/orchestrator/bin/release.json .
+
 FROM debian:${DEBIAN_RUNTIME_TAG} AS runtime
 
 ARG COMMIT_SHA

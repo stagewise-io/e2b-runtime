@@ -1,7 +1,7 @@
 # Klex fork only: builds the patched API image and pushes it to the Klex ECR
-# repository of the selected environment. Every other image (db-migrator,
-# client-proxy, clickhouse-migrator, orchestrator, envd) is consumed unchanged
-# from upstream releases.
+# repository of the selected environment. Orchestrator host binaries have
+# their own klex-publish-orchestrator.yml workflow. Other components keep
+# using upstream releases.
 #
 # Environment variables (set per GitHub environment, from infra outputs):
 #   AWS_ECR_PUBLISH_ROLE_ARN  OIDC role allowed to push to the repositories
