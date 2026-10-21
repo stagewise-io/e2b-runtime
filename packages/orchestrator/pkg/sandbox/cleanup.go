@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/cfg"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/resourcecontroller"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
@@ -25,13 +26,18 @@ type Cleanup struct {
 	error           error
 	once            sync.Once
 
+	resourceLease       *resourcecontroller.Lease
+	resourceWork        int
+	resourceErrors      error
+	resourceCleanupDone bool
+
 	hasRun atomic.Bool
 	mu     sync.Mutex
 }
 
 const lateCleanupLogMessage = "cleanup callback ran after cleanup completed"
 
-func runLateCleanup(ctx context.Context, f func(context.Context) error, priority bool) {
+func runLateCleanup(ctx context.Context, f func(context.Context) error, priority bool) error {
 	runCtx := context.WithoutCancel(ctx)
 	start := time.Now()
 	err := f(runCtx)
@@ -42,10 +48,12 @@ func runLateCleanup(ctx context.Context, f func(context.Context) error, priority
 	if err != nil {
 		logger.L().Error(runCtx, lateCleanupLogMessage, append(fields, zap.Error(err))...)
 
-		return
+		return err
 	}
 
 	logger.L().Info(runCtx, lateCleanupLogMessage, fields...)
+
+	return nil
 }
 
 // preserveConstructionCause retains the reason a failed constructor was canceled,
@@ -83,7 +91,7 @@ func (c *Cleanup) Add(ctx context.Context, f func(ctx context.Context) error) {
 	}
 	c.mu.Unlock()
 
-	runLateCleanup(ctx, f, false)
+	c.recordResourceError(runLateCleanup(ctx, f, false))
 }
 
 func (c *Cleanup) AddPriority(ctx context.Context, f func(ctx context.Context) error) {
@@ -96,7 +104,7 @@ func (c *Cleanup) AddPriority(ctx context.Context, f func(ctx context.Context) e
 	}
 	c.mu.Unlock()
 
-	runLateCleanup(ctx, f, true)
+	c.recordResourceError(runLateCleanup(ctx, f, true))
 }
 
 func (c *Cleanup) Run(ctx context.Context) error {
@@ -108,9 +116,11 @@ func (c *Cleanup) Run(ctx context.Context) error {
 }
 
 // cleanupIfNotRegistered covers errors before a resource's normal cleanup callback is registered.
-func cleanupIfNotRegistered(ctx context.Context, result *error, registered *bool, f func(context.Context) error) {
+func (c *Cleanup) cleanupIfNotRegistered(ctx context.Context, result *error, registered *bool, f func(context.Context) error) {
 	if *result != nil && !*registered {
-		*result = errors.Join(*result, f(context.WithoutCancel(ctx)))
+		err := f(context.WithoutCancel(ctx))
+		c.recordResourceError(err)
+		*result = errors.Join(*result, err)
 	}
 }
 
@@ -139,6 +149,52 @@ func (c *Cleanup) run(ctx context.Context) {
 	}
 
 	c.error = errors.Join(errs...)
+	c.mu.Lock()
+	c.resourceErrors = errors.Join(c.resourceErrors, c.error)
+	c.resourceCleanupDone = true
+	c.releaseResourcesLocked()
+	c.mu.Unlock()
+}
+
+// bindResources runs before construction launches asynchronous work.
+func (c *Cleanup) bindResources(lease *resourcecontroller.Lease) {
+	c.resourceLease = lease
+}
+
+// trackResourceWork keeps admission charged across late registration and async
+// teardown. Register before starting the worker; its completion is idempotent.
+func (c *Cleanup) trackResourceWork() func(error) {
+	c.mu.Lock()
+	if c.resourceLease == nil {
+		c.mu.Unlock()
+
+		return func(error) {}
+	}
+	c.resourceWork++
+	c.mu.Unlock()
+	var once sync.Once
+
+	return func(err error) {
+		once.Do(func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			c.resourceErrors = errors.Join(c.resourceErrors, err)
+			c.resourceWork--
+			c.releaseResourcesLocked()
+		})
+	}
+}
+
+func (c *Cleanup) recordResourceError(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resourceErrors = errors.Join(c.resourceErrors, err)
+}
+
+func (c *Cleanup) releaseResourcesLocked() {
+	if c.resourceLease != nil && c.resourceCleanupDone && c.resourceWork == 0 {
+		c.resourceLease.Release(c.resourceErrors)
+	}
 }
 
 func cleanupFiles(config cfg.BuilderConfig, files *storage.SandboxFiles) func(context.Context) error {

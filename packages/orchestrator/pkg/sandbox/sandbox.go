@@ -26,6 +26,7 @@ import (
 
 	"github.com/e2b-dev/infra/packages/clickhouse/pkg/hoststats"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/cfg"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/resourcecontroller"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/build"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/cgroup"
@@ -771,6 +772,8 @@ func (m *Metadata) ExecutionDuration() (time.Duration, bool) {
 }
 
 type Factory struct {
+	// Admission is shared with the RPC and info services, never per role.
+	Admission         *resourcecontroller.Controller
 	Sandboxes         *Map
 	config            cfg.BuilderConfig
 	networkPool       network.PoolInterface
@@ -820,6 +823,7 @@ func NewFactory(
 	egressProxy network.EgressProxy,
 	networkAssignHook NetworkAssignHook,
 	sandboxes *Map,
+	admission ...*resourcecontroller.Controller,
 ) *Factory {
 	if networkAssignHook == nil {
 		networkAssignHook = NoopNetworkAssignHook{}
@@ -847,6 +851,10 @@ func NewFactory(
 		// warm counter exists to make distinguishable from a working node.
 		envdBinCache: newEnvdBinCache(config.OrchestratorBaseDir),
 		envdTargets:  &envdTargetVersions{},
+	}
+
+	if len(admission) > 0 {
+		f.Admission = admission[0]
 	}
 
 	// Warm the promoted binary now rather than leaving it to the first resume that
@@ -1071,6 +1079,7 @@ func (f *Factory) CreateSandbox(
 	preBootFn PreBootFn,
 	opts ...CreateOption,
 ) (s *Sandbox, e error) {
+	ctx, incomingLease := takeResourceLease(ctx)
 	ctx, span := tracer.Start(ctx, "create sandbox")
 	defer span.End()
 	defer handleSpanError(span, &e)
@@ -1095,18 +1104,27 @@ func (f *Factory) CreateSandbox(
 	}()
 
 	lifecycleID := uuid.NewString()
+	lease, err := f.prepareResourceAdmission(ctx, template, config, rootfsCachePath, lifecycleID, cleanup, incomingLease)
+	if err != nil {
+		return nil, err
+	}
 
 	sandboxFiles := template.Files().NewSandboxFiles(runtime.SandboxID)
 	cleanup.Add(ctx, cleanupFiles(f.config, sandboxFiles))
 
 	// Fail before network or rootfs setup if a required CPU limit is unavailable.
-	cgroupHandle, err := createCgroup(ctx, f.cgroupManager, sandboxFiles.SandboxCgroupName(), config.ConfiguredVmVcpus > config.Vcpu)
+	cgroupHandle, err := createCgroup(ctx, f.cgroupManager, sandboxFiles.SandboxCgroupName(), config.ConfiguredVmVcpus > config.Vcpu || f.resourceEnforced())
 	if err != nil {
 		return nil, err
 	}
 	defer releaseCgroupFD(ctx, cgroupHandle, runtime.SandboxID)
 	cgroupRemovalRegistered := false
-	defer cleanupIfNotRegistered(ctx, &e, &cgroupRemovalRegistered, cgroupHandle.Remove)
+	defer cleanup.cleanupIfNotRegistered(ctx, &e, &cgroupRemovalRegistered, cgroupHandle.Remove)
+	if f.resourceEnforced() {
+		if err := cgroupHandle.SetSandboxCpuLimit(ctx, config.Vcpu); err != nil {
+			return nil, fmt.Errorf("resource admission CPU quota: %w", err)
+		}
+	}
 
 	ipsPromise := f.getNetworkSlot(ctx, cleanup, config, runtime, lifecycleID)
 
@@ -1325,6 +1343,8 @@ func (f *Factory) CreateSandbox(
 		}
 	}
 
+	resourceStarted(lease)
+
 	return sbx, nil
 }
 
@@ -1479,6 +1499,7 @@ func (f *Factory) ResumeSandbox(
 	apiConfigToStore *orchestrator.SandboxConfig,
 	opts ...ResumeOption,
 ) (s *Sandbox, e error) {
+	ctx, incomingLease := takeResourceLease(ctx)
 	ctx, span := tracer.Start(ctx, "resume sandbox")
 	defer span.End()
 	defer handleSpanError(span, &e)
@@ -1517,18 +1538,27 @@ func (f *Factory) ResumeSandbox(
 	}
 
 	lifecycleID := uuid.NewString()
+	lease, err := f.prepareResourceAdmission(ctx, t, config, "", lifecycleID, cleanup, incomingLease)
+	if err != nil {
+		return nil, err
+	}
 
 	sandboxFiles := t.Files().NewSandboxFiles(runtime.SandboxID)
 	cleanup.Add(ctx, cleanupFiles(f.config, sandboxFiles))
 
 	// Before any other resource: a sandbox that needs a limit and cannot get one fails here, cheaply.
-	cgroupHandle, cgroupErr := createCgroup(ctx, f.cgroupManager, sandboxFiles.SandboxCgroupName(), resolvedVmVcpus > config.Vcpu)
+	cgroupHandle, cgroupErr := createCgroup(ctx, f.cgroupManager, sandboxFiles.SandboxCgroupName(), resolvedVmVcpus > config.Vcpu || f.resourceEnforced())
 	if cgroupErr != nil {
 		return nil, cgroupErr
 	}
 	defer releaseCgroupFD(ctx, cgroupHandle, runtime.SandboxID)
 	cgroupRemovalRegistered := false
-	defer cleanupIfNotRegistered(ctx, &e, &cgroupRemovalRegistered, cgroupHandle.Remove)
+	defer cleanup.cleanupIfNotRegistered(ctx, &e, &cgroupRemovalRegistered, cgroupHandle.Remove)
+	if f.resourceEnforced() {
+		if err := cgroupHandle.SetSandboxCpuLimit(ctx, config.Vcpu); err != nil {
+			return nil, fmt.Errorf("resource admission CPU quota: %w", err)
+		}
+	}
 
 	telemetry.ReportEvent(ctx, "created sandbox files")
 
@@ -1659,7 +1689,9 @@ func (f *Factory) ResumeSandbox(
 	ipsPromise := f.getNetworkSlot(ctx, cleanup, config, runtime, lifecycleID)
 
 	// Rootfs initialization
+	overlayWorkDone := cleanup.trackResourceWork()
 	overlayPromise := utils.NewPromise(func() (rootfs.Provider, error) {
+		defer overlayWorkDone(nil)
 		readonlyRootfs, err := t.Rootfs()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get rootfs: %w", err)
@@ -1687,7 +1719,9 @@ func (f *Factory) ResumeSandbox(
 	})
 
 	// Memory initialization
+	memoryWorkDone := cleanup.trackResourceWork()
 	memoryPromise := utils.NewPromise(func() (struct{}, error) {
+		defer memoryWorkDone(nil)
 		fcUffd, err := uffdPromise.Wait(ctx)
 		if err != nil {
 			return struct{}{}, err
@@ -2066,6 +2100,8 @@ func (f *Factory) ResumeSandbox(
 		fcErr := fcHandle.Exit.Wait()
 		exit.SetError(errors.Join(err, fcErr, uffdWaitErr))
 	}()
+
+	resourceStarted(lease)
 
 	return sbx, nil
 }
@@ -4464,7 +4500,10 @@ func getNetworkSlot(
 	networkReleased network.ReleaseNotify,
 	egressClass sandboxtypes.EgressClass,
 ) *utils.Promise[*network.Slot] {
+	workDone := cleanup.trackResourceWork()
+
 	return utils.NewPromise(func() (*network.Slot, error) {
+		defer workDone(nil)
 		ctx, span := tracer.Start(ctx, "get network-slot")
 		defer span.End()
 

@@ -3,13 +3,16 @@ package nodemanager
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
 	"github.com/e2b-dev/infra/packages/shared/pkg/smap"
 )
 
 type SandboxResources struct {
 	CPUs      int64
 	MiBMemory int64
+	MiBDisk   int64
 	// HugePages reports whether the sandbox's RAM comes from the node's
 	// hugepage pool rather than ordinary pages.
 	HugePages bool
@@ -20,6 +23,11 @@ type PlacementMetrics struct {
 
 	// startMu makes StartPlacingIf's check and insert one step per node.
 	startMu sync.Mutex
+
+	accountMu   sync.Mutex
+	nextAttempt uint64
+	current     map[string]uint64
+	overlays    map[uint64]placementOverlay
 
 	createSuccess atomic.Uint64
 	createFails   atomic.Uint64
@@ -66,11 +74,110 @@ func (p *PlacementMetrics) StartPlacingIf(sandboxID string, resources SandboxRes
 		return false
 	}
 
-	p.sandboxesInProgress.Insert(sandboxID, resources)
+	p.begin(sandboxID, resources)
 
 	return true
 }
 
 func (p *PlacementMetrics) removeSandbox(sandboxID string) {
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	delete(p.overlays, p.current[sandboxID])
+	delete(p.current, sandboxID)
 	p.sandboxesInProgress.Remove(sandboxID)
+}
+
+type placementOverlay struct {
+	resources   SandboxResources
+	succeededAt time.Time
+}
+
+// PlacementAttempt qualifies completion by attempt, not just sandbox identity.
+// An older RPC cannot remove the pending entry for a newer attempt.
+type PlacementAttempt struct {
+	metrics   *PlacementMetrics
+	sandboxID string
+	token     uint64
+}
+
+func (p *PlacementMetrics) begin(id string, resources SandboxResources) *PlacementAttempt {
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	if p.overlays == nil {
+		p.overlays = make(map[uint64]placementOverlay)
+		p.current = make(map[string]uint64)
+	}
+	p.nextAttempt++
+	p.current[id] = p.nextAttempt
+	p.overlays[p.nextAttempt] = placementOverlay{resources: resources}
+	p.sandboxesInProgress.Insert(id, resources)
+
+	return &PlacementAttempt{metrics: p, sandboxID: id, token: p.nextAttempt}
+}
+
+func (p *PlacementMetrics) BeginPlacingIf(id string, resources SandboxResources, fits func() bool) *PlacementAttempt {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if !fits() {
+		return nil
+	}
+
+	return p.begin(id, resources)
+}
+
+func (a *PlacementAttempt) complete(success, failed bool) {
+	p := a.metrics
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	overlay, exists := p.overlays[a.token]
+	if !exists || !overlay.succeededAt.IsZero() {
+		return
+	}
+	if success {
+		overlay.succeededAt = time.Now()
+		p.overlays[a.token] = overlay
+		p.createSuccess.Add(1)
+	} else {
+		delete(p.overlays, a.token)
+		if failed {
+			p.createFails.Add(1)
+		}
+	}
+	if p.current[a.sandboxID] == a.token {
+		delete(p.current, a.sandboxID)
+		p.sandboxesInProgress.Remove(a.sandboxID)
+	}
+}
+
+func (a *PlacementAttempt) Success() { a.complete(true, false) }
+func (a *PlacementAttempt) Skip()    { a.complete(false, false) }
+func (a *PlacementAttempt) Fail()    { a.complete(false, true) }
+
+// retireSuccesses runs while the node metrics lock holds the replacement report.
+func (p *PlacementMetrics) retireSuccesses(requestedAt time.Time) {
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	for token, overlay := range p.overlays {
+		if !overlay.succeededAt.IsZero() && requestedAt.After(overlay.succeededAt) {
+			delete(p.overlays, token)
+		}
+	}
+}
+
+func (p *PlacementMetrics) pendingResources() (resourceadmission.Resources, error) {
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	var total resourceadmission.Resources
+	for _, overlay := range p.overlays {
+		res, err := resourceadmission.FromMiB(overlay.resources.CPUs, overlay.resources.MiBDisk)
+		if err != nil {
+			return total, err
+		}
+		total, err = total.Add(res)
+		if err != nil {
+			return total, err
+		}
+	}
+
+	return total, nil
 }

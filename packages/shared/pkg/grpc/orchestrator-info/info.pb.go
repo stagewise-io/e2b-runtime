@@ -280,6 +280,207 @@ func (x *MachineInfo) GetCpuFlags() []string {
 	return nil
 }
 
+// Additive contract. An absent report means the node predates admission.
+type ResourceAdmissionReport struct {
+	state         protoimpl.MessageState         `protogen:"open.v1"`
+	Version       uint32                         `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	Enabled       bool                           `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Valid         bool                           `protobuf:"varint,3,opt,name=valid,proto3" json:"valid,omitempty"`
+	Uncertain     bool                           `protobuf:"varint,4,opt,name=uncertain,proto3" json:"uncertain,omitempty"`
+	CpuLimit      uint64                         `protobuf:"varint,5,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
+	CpuCommitted  uint64                         `protobuf:"varint,6,opt,name=cpu_committed,json=cpuCommitted,proto3" json:"cpu_committed,omitempty"`
+	Filesystems   []*ResourceAdmissionFilesystem `protobuf:"bytes,7,rep,name=filesystems,proto3" json:"filesystems,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceAdmissionReport) Reset() {
+	*x = ResourceAdmissionReport{}
+	mi := &file_info_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceAdmissionReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceAdmissionReport) ProtoMessage() {}
+
+func (x *ResourceAdmissionReport) ProtoReflect() protoreflect.Message {
+	mi := &file_info_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceAdmissionReport.ProtoReflect.Descriptor instead.
+func (*ResourceAdmissionReport) Descriptor() ([]byte, []int) {
+	return file_info_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ResourceAdmissionReport) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionReport) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *ResourceAdmissionReport) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
+func (x *ResourceAdmissionReport) GetUncertain() bool {
+	if x != nil {
+		return x.Uncertain
+	}
+	return false
+}
+
+func (x *ResourceAdmissionReport) GetCpuLimit() uint64 {
+	if x != nil {
+		return x.CpuLimit
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionReport) GetCpuCommitted() uint64 {
+	if x != nil {
+		return x.CpuCommitted
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionReport) GetFilesystems() []*ResourceAdmissionFilesystem {
+	if x != nil {
+		return x.Filesystems
+	}
+	return nil
+}
+
+type ResourceAdmissionFilesystem struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Id                    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Roles                 []string               `protobuf:"bytes,2,rep,name=roles,proto3" json:"roles,omitempty"`
+	Valid                 bool                   `protobuf:"varint,3,opt,name=valid,proto3" json:"valid,omitempty"`
+	TotalBytes            uint64                 `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	AvailableBytes        uint64                 `protobuf:"varint,5,opt,name=available_bytes,json=availableBytes,proto3" json:"available_bytes,omitempty"`
+	LogicalLimitBytes     uint64                 `protobuf:"varint,6,opt,name=logical_limit_bytes,json=logicalLimitBytes,proto3" json:"logical_limit_bytes,omitempty"`
+	LogicalCommittedBytes uint64                 `protobuf:"varint,7,opt,name=logical_committed_bytes,json=logicalCommittedBytes,proto3" json:"logical_committed_bytes,omitempty"`
+	WriteReservedBytes    uint64                 `protobuf:"varint,8,opt,name=write_reserved_bytes,json=writeReservedBytes,proto3" json:"write_reserved_bytes,omitempty"`
+	HeadroomBytes         uint64                 `protobuf:"varint,9,opt,name=headroom_bytes,json=headroomBytes,proto3" json:"headroom_bytes,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *ResourceAdmissionFilesystem) Reset() {
+	*x = ResourceAdmissionFilesystem{}
+	mi := &file_info_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceAdmissionFilesystem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceAdmissionFilesystem) ProtoMessage() {}
+
+func (x *ResourceAdmissionFilesystem) ProtoReflect() protoreflect.Message {
+	mi := &file_info_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceAdmissionFilesystem.ProtoReflect.Descriptor instead.
+func (*ResourceAdmissionFilesystem) Descriptor() ([]byte, []int) {
+	return file_info_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ResourceAdmissionFilesystem) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ResourceAdmissionFilesystem) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *ResourceAdmissionFilesystem) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
+func (x *ResourceAdmissionFilesystem) GetTotalBytes() uint64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionFilesystem) GetAvailableBytes() uint64 {
+	if x != nil {
+		return x.AvailableBytes
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionFilesystem) GetLogicalLimitBytes() uint64 {
+	if x != nil {
+		return x.LogicalLimitBytes
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionFilesystem) GetLogicalCommittedBytes() uint64 {
+	if x != nil {
+		return x.LogicalCommittedBytes
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionFilesystem) GetWriteReservedBytes() uint64 {
+	if x != nil {
+		return x.WriteReservedBytes
+	}
+	return 0
+}
+
+func (x *ResourceAdmissionFilesystem) GetHeadroomBytes() uint64 {
+	if x != nil {
+		return x.HeadroomBytes
+	}
+	return 0
+}
+
 type ServiceInfoResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	NodeId                 string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -296,6 +497,8 @@ type ServiceInfoResponse struct {
 	OutstandingWork uint64 `protobuf:"varint,58,opt,name=outstanding_work,json=outstandingWork,proto3" json:"outstanding_work,omitempty"`
 	// Nonpositive values reject sandbox creation.
 	MaxSandboxes int64 `protobuf:"varint,59,opt,name=max_sandboxes,json=maxSandboxes,proto3" json:"max_sandboxes,omitempty"`
+	// Includes starting and stopping physical lifecycles, unlike live metrics.
+	ResourceAdmission *ResourceAdmissionReport `protobuf:"bytes,60,opt,name=resource_admission,json=resourceAdmission,proto3" json:"resource_admission,omitempty"`
 	// Deprecated: Marked as deprecated in info.proto.
 	MetricVcpuUsed int64 `protobuf:"varint,101,opt,name=metric_vcpu_used,json=metricVcpuUsed,proto3" json:"metric_vcpu_used,omitempty"`
 	// Deprecated: Marked as deprecated in info.proto.
@@ -328,7 +531,7 @@ type ServiceInfoResponse struct {
 
 func (x *ServiceInfoResponse) Reset() {
 	*x = ServiceInfoResponse{}
-	mi := &file_info_proto_msgTypes[2]
+	mi := &file_info_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -340,7 +543,7 @@ func (x *ServiceInfoResponse) String() string {
 func (*ServiceInfoResponse) ProtoMessage() {}
 
 func (x *ServiceInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_info_proto_msgTypes[2]
+	mi := &file_info_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -353,7 +556,7 @@ func (x *ServiceInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceInfoResponse.ProtoReflect.Descriptor instead.
 func (*ServiceInfoResponse) Descriptor() ([]byte, []int) {
-	return file_info_proto_rawDescGZIP(), []int{2}
+	return file_info_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ServiceInfoResponse) GetNodeId() string {
@@ -438,6 +641,13 @@ func (x *ServiceInfoResponse) GetMaxSandboxes() int64 {
 		return x.MaxSandboxes
 	}
 	return 0
+}
+
+func (x *ServiceInfoResponse) GetResourceAdmission() *ResourceAdmissionReport {
+	if x != nil {
+		return x.ResourceAdmission
+	}
+	return nil
 }
 
 // Deprecated: Marked as deprecated in info.proto.
@@ -571,7 +781,7 @@ type ServiceStatusChangeRequest struct {
 
 func (x *ServiceStatusChangeRequest) Reset() {
 	*x = ServiceStatusChangeRequest{}
-	mi := &file_info_proto_msgTypes[3]
+	mi := &file_info_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +793,7 @@ func (x *ServiceStatusChangeRequest) String() string {
 func (*ServiceStatusChangeRequest) ProtoMessage() {}
 
 func (x *ServiceStatusChangeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_info_proto_msgTypes[3]
+	mi := &file_info_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +806,7 @@ func (x *ServiceStatusChangeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceStatusChangeRequest.ProtoReflect.Descriptor instead.
 func (*ServiceStatusChangeRequest) Descriptor() ([]byte, []int) {
-	return file_info_proto_rawDescGZIP(), []int{3}
+	return file_info_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ServiceStatusChangeRequest) GetServiceStatus() ServiceInfoStatus {
@@ -627,7 +837,26 @@ const file_info_proto_rawDesc = "" +
 	"cpu_family\x18\x02 \x01(\tR\tcpuFamily\x12\x1b\n" +
 	"\tcpu_model\x18\x03 \x01(\tR\bcpuModel\x12$\n" +
 	"\x0ecpu_model_name\x18\x04 \x01(\tR\fcpuModelName\x12\x1b\n" +
-	"\tcpu_flags\x18\x05 \x03(\tR\bcpuFlags\"\xdd\v\n" +
+	"\tcpu_flags\x18\x05 \x03(\tR\bcpuFlags\"\x83\x02\n" +
+	"\x17ResourceAdmissionReport\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\rR\aversion\x12\x18\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\x12\x14\n" +
+	"\x05valid\x18\x03 \x01(\bR\x05valid\x12\x1c\n" +
+	"\tuncertain\x18\x04 \x01(\bR\tuncertain\x12\x1b\n" +
+	"\tcpu_limit\x18\x05 \x01(\x04R\bcpuLimit\x12#\n" +
+	"\rcpu_committed\x18\x06 \x01(\x04R\fcpuCommitted\x12>\n" +
+	"\vfilesystems\x18\a \x03(\v2\x1c.ResourceAdmissionFilesystemR\vfilesystems\"\xe4\x02\n" +
+	"\x1bResourceAdmissionFilesystem\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05roles\x18\x02 \x03(\tR\x05roles\x12\x14\n" +
+	"\x05valid\x18\x03 \x01(\bR\x05valid\x12\x1f\n" +
+	"\vtotal_bytes\x18\x04 \x01(\x04R\n" +
+	"totalBytes\x12'\n" +
+	"\x0favailable_bytes\x18\x05 \x01(\x04R\x0eavailableBytes\x12.\n" +
+	"\x13logical_limit_bytes\x18\x06 \x01(\x04R\x11logicalLimitBytes\x126\n" +
+	"\x17logical_committed_bytes\x18\a \x01(\x04R\x15logicalCommittedBytes\x120\n" +
+	"\x14write_reserved_bytes\x18\b \x01(\x04R\x12writeReservedBytes\x12%\n" +
+	"\x0eheadroom_bytes\x18\t \x01(\x04R\rheadroomBytes\"\xa6\f\n" +
 	"\x13ServiceInfoResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1d\n" +
 	"\n" +
@@ -641,7 +870,8 @@ const file_info_proto_rawDesc = "" +
 	"\x06labels\x187 \x03(\tR\x06labels\x12U\n" +
 	"\x19service_status_changed_at\x188 \x01(\v2\x1a.google.protobuf.TimestampR\x16serviceStatusChangedAt\x12)\n" +
 	"\x10outstanding_work\x18: \x01(\x04R\x0foutstandingWork\x12#\n" +
-	"\rmax_sandboxes\x18; \x01(\x03R\fmaxSandboxes\x12,\n" +
+	"\rmax_sandboxes\x18; \x01(\x03R\fmaxSandboxes\x12G\n" +
+	"\x12resource_admission\x18< \x01(\v2\x18.ResourceAdmissionReportR\x11resourceAdmission\x12,\n" +
 	"\x10metric_vcpu_used\x18e \x01(\x03B\x02\x18\x01R\x0emetricVcpuUsed\x125\n" +
 	"\x15metric_memory_used_mb\x18f \x01(\x03B\x02\x18\x01R\x12metricMemoryUsedMb\x12(\n" +
 	"\x0emetric_disk_mb\x18g \x01(\x03B\x02\x18\x01R\fmetricDiskMb\x128\n" +
@@ -687,34 +917,38 @@ func file_info_proto_rawDescGZIP() []byte {
 }
 
 var file_info_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_info_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_info_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_info_proto_goTypes = []any{
-	(ServiceInfoStatus)(0),             // 0: ServiceInfoStatus
-	(ServiceInfoRole)(0),               // 1: ServiceInfoRole
-	(*DiskMetrics)(nil),                // 2: DiskMetrics
-	(*MachineInfo)(nil),                // 3: MachineInfo
-	(*ServiceInfoResponse)(nil),        // 4: ServiceInfoResponse
-	(*ServiceStatusChangeRequest)(nil), // 5: ServiceStatusChangeRequest
-	(*timestamppb.Timestamp)(nil),      // 6: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),              // 7: google.protobuf.Empty
+	(ServiceInfoStatus)(0),              // 0: ServiceInfoStatus
+	(ServiceInfoRole)(0),                // 1: ServiceInfoRole
+	(*DiskMetrics)(nil),                 // 2: DiskMetrics
+	(*MachineInfo)(nil),                 // 3: MachineInfo
+	(*ResourceAdmissionReport)(nil),     // 4: ResourceAdmissionReport
+	(*ResourceAdmissionFilesystem)(nil), // 5: ResourceAdmissionFilesystem
+	(*ServiceInfoResponse)(nil),         // 6: ServiceInfoResponse
+	(*ServiceStatusChangeRequest)(nil),  // 7: ServiceStatusChangeRequest
+	(*timestamppb.Timestamp)(nil),       // 8: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),               // 9: google.protobuf.Empty
 }
 var file_info_proto_depIdxs = []int32{
-	0, // 0: ServiceInfoResponse.service_status:type_name -> ServiceInfoStatus
-	1, // 1: ServiceInfoResponse.service_roles:type_name -> ServiceInfoRole
-	6, // 2: ServiceInfoResponse.service_startup:type_name -> google.protobuf.Timestamp
-	3, // 3: ServiceInfoResponse.machine_info:type_name -> MachineInfo
-	6, // 4: ServiceInfoResponse.service_status_changed_at:type_name -> google.protobuf.Timestamp
-	2, // 5: ServiceInfoResponse.metric_disks:type_name -> DiskMetrics
-	0, // 6: ServiceStatusChangeRequest.service_status:type_name -> ServiceInfoStatus
-	7, // 7: InfoService.ServiceInfo:input_type -> google.protobuf.Empty
-	5, // 8: InfoService.ServiceStatusOverride:input_type -> ServiceStatusChangeRequest
-	4, // 9: InfoService.ServiceInfo:output_type -> ServiceInfoResponse
-	7, // 10: InfoService.ServiceStatusOverride:output_type -> google.protobuf.Empty
-	9, // [9:11] is the sub-list for method output_type
-	7, // [7:9] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	5,  // 0: ResourceAdmissionReport.filesystems:type_name -> ResourceAdmissionFilesystem
+	0,  // 1: ServiceInfoResponse.service_status:type_name -> ServiceInfoStatus
+	1,  // 2: ServiceInfoResponse.service_roles:type_name -> ServiceInfoRole
+	8,  // 3: ServiceInfoResponse.service_startup:type_name -> google.protobuf.Timestamp
+	3,  // 4: ServiceInfoResponse.machine_info:type_name -> MachineInfo
+	8,  // 5: ServiceInfoResponse.service_status_changed_at:type_name -> google.protobuf.Timestamp
+	4,  // 6: ServiceInfoResponse.resource_admission:type_name -> ResourceAdmissionReport
+	2,  // 7: ServiceInfoResponse.metric_disks:type_name -> DiskMetrics
+	0,  // 8: ServiceStatusChangeRequest.service_status:type_name -> ServiceInfoStatus
+	9,  // 9: InfoService.ServiceInfo:input_type -> google.protobuf.Empty
+	7,  // 10: InfoService.ServiceStatusOverride:input_type -> ServiceStatusChangeRequest
+	6,  // 11: InfoService.ServiceInfo:output_type -> ServiceInfoResponse
+	9,  // 12: InfoService.ServiceStatusOverride:output_type -> google.protobuf.Empty
+	11, // [11:13] is the sub-list for method output_type
+	9,  // [9:11] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_info_proto_init() }
@@ -728,7 +962,7 @@ func file_info_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_info_proto_rawDesc), len(file_info_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

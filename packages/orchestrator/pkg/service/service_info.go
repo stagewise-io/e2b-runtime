@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/metrics"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/resourcecontroller"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/service/machineinfo"
 	orchestratorinfo "github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator-info"
@@ -24,14 +25,20 @@ type Server struct {
 	info        *ServiceInfo
 	sandboxes   *sandbox.Map
 	hostMetrics *metrics.HostMetrics
+	admission   *resourcecontroller.Controller
 }
 
-func NewInfoService(info *ServiceInfo, sandboxes *sandbox.Map, hostMetrics *metrics.HostMetrics) *Server {
-	return &Server{
+func NewInfoService(info *ServiceInfo, sandboxes *sandbox.Map, hostMetrics *metrics.HostMetrics, admission ...*resourcecontroller.Controller) *Server {
+	s := &Server{
 		info:        info,
 		sandboxes:   sandboxes,
 		hostMetrics: hostMetrics,
 	}
+	if len(admission) > 0 {
+		s.admission = admission[0]
+	}
+
+	return s
 }
 
 func (s *Server) ServiceInfo(ctx context.Context, _ *emptypb.Empty) (*orchestratorinfo.ServiceInfoResponse, error) {
@@ -72,7 +79,13 @@ func (s *Server) ServiceInfo(ctx context.Context, _ *emptypb.Empty) (*orchestrat
 	outstandingWork := uint64(info.outstandingWork)
 	info.statusMu.RUnlock()
 
+	var admissionReport *orchestratorinfo.ResourceAdmissionReport
+	if s.admission != nil {
+		admissionReport = s.admission.Report().Proto()
+	}
+
 	return &orchestratorinfo.ServiceInfoResponse{
+		ResourceAdmission:      admissionReport,
 		NodeId:                 info.ClientId,
 		ServiceId:              info.ServiceId,
 		ServiceStatus:          serviceStatus.Status,

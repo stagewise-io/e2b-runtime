@@ -83,6 +83,18 @@ func TestDisableLegacyTeamMutationsFlagFallback(t *testing.T) {
 	assert.False(t, client.BoolFlag(t.Context(), DisableLegacyTeamMutationsFlag))
 }
 
+func TestResourceAdmissionPlacementDefaultDisabled(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClientWithDatasource(ldtestdata.DataSource())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, client.Close(context.WithoutCancel(t.Context())))
+	})
+
+	assert.False(t, client.BoolFlag(t.Context(), PlacementResourceAdmission))
+}
+
 // Guards the default map shipped in this package: every entry's key must be
 // the LD key its value derives to, or the lookup silently never hits.
 func TestFirecrackerVersionMap_KeysMatchLDKeys(t *testing.T) {
