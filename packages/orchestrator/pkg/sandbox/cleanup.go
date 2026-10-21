@@ -89,9 +89,10 @@ func (c *Cleanup) Add(ctx context.Context, f func(ctx context.Context) error) {
 
 		return
 	}
+	complete := c.trackResourceWorkLocked()
 	c.mu.Unlock()
 
-	c.recordResourceError(runLateCleanup(ctx, f, false))
+	complete(runLateCleanup(ctx, f, false))
 }
 
 func (c *Cleanup) AddPriority(ctx context.Context, f func(ctx context.Context) error) {
@@ -102,9 +103,10 @@ func (c *Cleanup) AddPriority(ctx context.Context, f func(ctx context.Context) e
 
 		return
 	}
+	complete := c.trackResourceWorkLocked()
 	c.mu.Unlock()
 
-	c.recordResourceError(runLateCleanup(ctx, f, true))
+	complete(runLateCleanup(ctx, f, true))
 }
 
 func (c *Cleanup) Run(ctx context.Context) error {
@@ -165,13 +167,17 @@ func (c *Cleanup) bindResources(lease *resourcecontroller.Lease) {
 // teardown. Register before starting the worker; its completion is idempotent.
 func (c *Cleanup) trackResourceWork() func(error) {
 	c.mu.Lock()
-	if c.resourceLease == nil {
-		c.mu.Unlock()
+	defer c.mu.Unlock()
 
+	return c.trackResourceWorkLocked()
+}
+
+// trackResourceWorkLocked registers before Run can release the lease.
+func (c *Cleanup) trackResourceWorkLocked() func(error) {
+	if c.resourceLease == nil {
 		return func(error) {}
 	}
 	c.resourceWork++
-	c.mu.Unlock()
 	var once sync.Once
 
 	return func(err error) {

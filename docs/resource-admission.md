@@ -56,10 +56,10 @@ additions, and fit comparisons reject overflow instead of wrapping.
 
 ## Filesystem sampling
 
-The controller requires the `rootfs`, `build`, and `template` role paths. Integration
-must supply `StorageConfig.SandboxCacheDir`, `DefaultCacheDir`, and
-`StorageConfig.TemplateCacheDir`, respectively. Startup supplies those paths. `SandboxDir` does not identify the
-writable rootfs cache.
+Startup requires the `rootfs`, `build`, `template`, and `build-rootfs` role paths.
+Integration must supply `StorageConfig.SandboxCacheDir`, `DefaultCacheDir`,
+`StorageConfig.TemplateCacheDir`, and `TemplatesDir`, respectively. `SandboxDir`
+does not identify the writable rootfs cache.
 
 The Linux sampler opens a directory and obtains its device identity and `Statfs`
 values from the same descriptor. Free space uses `Bavail`, not `Bfree`. Paths and
@@ -109,7 +109,13 @@ copy remains reserved through upload completion or abandonment.
 Upload completion alone cannot release a reservation while deferred memory or
 rootfs writers remain. Every writer is joined, including after another writer
 fails. If completion cannot be established, commitments remain and the controller
-becomes uncertain. Disabled mode preserves the legacy pause accounting.
+becomes uncertain. Snapshot setup errors currently provide no proof that all
+writers have stopped, so any error returned before ownership transfers to the
+upload retains the write leases and makes the controller uncertain. This is a
+fail-closed availability trade-off, even for errors that occurred before writes
+started. Recovery requires draining and restarting the node with successful
+startup reclaim. Do not clear the latch or release leases merely because the
+request ended. Disabled mode preserves the legacy pause accounting.
 
 ## Reporting and API integration
 
@@ -125,6 +131,10 @@ checks each filesystem's headroom. With `placement-resource-admission` enabled,
 the API applies it during best-of-K sampling and the final atomic pending insert,
 including preferred-node resumes. CPU-model, feature, label and hugepage checks
 remain separate. Disk demand comes from `SandboxConfig.total_disk_size_mb`.
+When placement admission is enabled, missing, nonpositive, or overflowing resource
+quantities are rejected before node selection as a non-retryable stored-build
+error, not temporary capacity exhaustion. Legacy builds must have a valid total
+rootfs size before enablement; requested free space is not a safe substitute.
 
 Absent, unsupported-version or enforcement-disabled reports are capability
 mismatches. An enabled reporter with invalid, uncertain, future-dated or stale
@@ -169,8 +179,13 @@ Before enabling either switch:
   KVM/NBD. Exercise create, cleanup, pause, both checkpoint paths, harvest, restart
   and startup reclaim. The local results below do not establish these guarantees.
 - Select explicit CPU and disk percentages and disk headroom for each node pool.
-  Confirm the rootfs, build and template paths refer to the intended filesystems.
+  Confirm the rootfs, build, template and build-rootfs paths refer to the intended
+  filesystems. Verify legacy builds have valid total-rootfs resource metadata.
   Do not infer safe production values from the unit tests.
+- Review the snapshot-error availability cost before enabling enforcement. Any
+  snapshot setup error currently blocks new node admission until drain/restart,
+  even if no writer started. Safe early release requires a stronger rollback
+  completion contract, not an assumption based on the returned error.
 - Deploy compatible artifacts with both switches disabled. Verify the existing
   sandbox lifecycle and legacy live-allocation metrics before enabling admission.
 - Enable node admission on a canary with the chosen policy. Validate host-lock
@@ -255,6 +270,17 @@ claim that the entire repository has no lint findings. Bounded-memory attempts
 previously timed out or were killed. The successful run uses `GOMAXPROCS=2`,
 `GOMEMLIMIT=900MiB`, `GOGC=100`, `GOFLAGS=-p=1`, `--concurrency=1`, and a persistent
 lint cache. No lint rules were disabled.
+
+Review follow-up validation also exited 0 for the full unprivileged sandbox race
+suite, ten repeated cleanup race runs, the seven-package Linux regression, and
+`TestResourceAdmissionPlacementFlagFallback` with
+`PLACEMENT_RESOURCE_ADMISSION=true`. The API short-mode regression and ten-run
+placement race suite passed again after the metadata-validation fix. Vet passed
+again across the review-changed packages. A module-aware lint run over API
+`internal/orchestrator/...`, orchestrator `pkg/sandbox` and `pkg/server`, and shared
+`pkg/featureflags` reported `0 issues` without a changed-line filter. This scoped
+run does not claim the whole repository is clean. The unprivileged suite still
+skips privileged fixtures.
 
 To reproduce the API short-mode result from the repository root on the same local
 Docker setup:

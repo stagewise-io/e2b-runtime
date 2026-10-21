@@ -9,6 +9,14 @@ import (
 
 const admissionMaxSampleAge = 30 * time.Second
 
+// InvalidResourceRequestError identifies stored build metadata that cannot be
+// admitted on any node. Retrying placement cannot recover missing resource sizes.
+type InvalidResourceRequestError struct{}
+
+func (InvalidResourceRequestError) Error() string {
+	return "template has invalid CPU or total rootfs size for enforced resource admission"
+}
+
 type UnsupportedResourceAdmissionError struct{}
 
 func (UnsupportedResourceAdmissionError) Error() string {

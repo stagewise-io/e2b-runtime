@@ -212,7 +212,7 @@ func unavailableNodeWouldFit(nodes []*nodemanager.Node, excludedNodes map[string
 }
 
 // sample returns up to k items chosen uniformly from those passing ok, and
-// whether any node passed every check but memory.
+// whether any otherwise eligible node failed memory or resource admission.
 func (b *BestOfK) sample(items []*nodemanager.Node, config BestOfKConfig, excludedNodes map[string]struct{}, resources nodemanager.SandboxResources, requirements Requirements, filterByLabels bool, requiredLabels []string) (candidates []*nodemanager.Node, poolsFull bool) {
 	if config.K <= 0 || len(items) == 0 {
 		return nil, false

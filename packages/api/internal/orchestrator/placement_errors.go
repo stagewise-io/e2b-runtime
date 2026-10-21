@@ -126,10 +126,13 @@ func placementAPIError(err error) *api.APIError {
 		noEligibleErr           placement.FailedToPlaceSandboxError
 		unsupportedErr          placement.UnsupportedFeatureError
 		unsupportedAdmissionErr placement.UnsupportedResourceAdmissionError
+		invalidResourceErr      placement.InvalidResourceRequestError
 		createErr               placement.SandboxCreateError
 	)
 
 	switch {
+	case errors.As(err, &invalidResourceErr):
+		return apiErr(http.StatusInternalServerError, errCodeSandboxCreateRefused, placementMessagePrefix+": "+invalidResourceErr.Error())
 	case errors.As(err, &timeoutErr):
 		if timeoutErr.Attempts == 0 {
 			result := apiErr(http.StatusGatewayTimeout, errCodePlacementTimeout, placementMessagePrefix+": placement timed out, please retry")

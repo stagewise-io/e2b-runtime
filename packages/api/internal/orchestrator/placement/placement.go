@@ -13,6 +13,7 @@ import (
 	"github.com/e2b-dev/infra/packages/api/internal/utils"
 	"github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
+	"github.com/e2b-dev/infra/packages/shared/pkg/resourceadmission"
 	"github.com/e2b-dev/infra/packages/shared/pkg/telemetry"
 	sharedutils "github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
@@ -114,6 +115,12 @@ func placeSandbox(
 		MiBMemory: sbxRequest.GetSandbox().GetRamMb(),
 		MiBDisk:   sbxRequest.GetSandbox().GetTotalDiskSizeMb(),
 		HugePages: sbxRequest.GetSandbox().GetHugePages(),
+	}
+
+	if requirements.ResourceAdmission {
+		if _, err := resourceadmission.FromMiB(resources.CPUs, resources.MiBDisk); err != nil {
+			return PlacementResult{}, InvalidResourceRequestError{}
+		}
 	}
 
 	var node *nodemanager.Node

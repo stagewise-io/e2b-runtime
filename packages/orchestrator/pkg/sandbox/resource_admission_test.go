@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -101,6 +102,64 @@ func TestResourceCleanupDoesNotReleaseInsideCallback(t *testing.T) {
 	close(finish)
 	require.NoError(t, <-done)
 	require.Zero(t, c.Report().CPUCommitted)
+}
+
+func TestResourceCleanupTracksConcurrentLateCallbacks(t *testing.T) {
+	t.Parallel()
+	for _, priority := range []bool{false, true} {
+		for _, fail := range []bool{false, true} {
+			name := map[bool]string{false: "normal", true: "priority"}[priority] + "/" + map[bool]string{false: "success", true: "failure"}[fail]
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				synctest.Test(t, func(t *testing.T) {
+					c := admissionController(t)
+					cleanup := boundCleanup(t, c)
+					runEntered, runFinish := make(chan struct{}), make(chan struct{})
+					cleanup.Add(t.Context(), func(context.Context) error {
+						close(runEntered)
+						<-runFinish
+
+						return nil
+					})
+					runDone := make(chan error, 1)
+					go func() { runDone <- cleanup.Run(t.Context()) }()
+					<-runEntered
+					lateEntered, lateFinish, lateDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+					add := cleanup.Add
+					if priority {
+						add = cleanup.AddPriority
+					}
+					go func() {
+						defer close(lateDone)
+						add(t.Context(), func(context.Context) error {
+							close(lateEntered)
+							<-lateFinish
+							if fail {
+								return errors.New("late cleanup still owns disk")
+							}
+
+							return nil
+						})
+					}()
+					<-lateEntered
+					close(runFinish)
+					synctest.Wait()
+					during := c.Report()
+					close(lateFinish)
+					<-lateDone
+					require.NoError(t, <-runDone)
+					require.Equal(t, uint64(2), during.CPUCommitted, "Run must not release a lease while a late callback runs")
+					after := c.Report()
+					require.Equal(t, fail, after.Uncertain)
+					if fail {
+						require.Equal(t, uint64(2), after.CPUCommitted)
+					} else {
+						require.Zero(t, after.CPUCommitted)
+					}
+				})
+			})
+		}
+	}
 }
 
 type resourceAdmissionTemplate struct {

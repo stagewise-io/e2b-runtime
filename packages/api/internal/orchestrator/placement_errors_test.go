@@ -69,6 +69,14 @@ func TestPlacementAPIError(t *testing.T) {
 			wantRetry:     apierrors.CanRetry,
 		},
 		{
+			name:          "invalid resource metadata is not capacity exhaustion",
+			err:           placement.InvalidResourceRequestError{},
+			wantCode:      http.StatusInternalServerError,
+			wantErrorCode: "sandbox_create_refused",
+			wantMsg:       "Failed to place sandbox: template has invalid CPU or total rootfs size for enforced resource admission",
+			wantRetry:     apierrors.NoRetry,
+		},
+		{
 			name:          "resource admission unsupported",
 			err:           placement.UnsupportedResourceAdmissionError{},
 			wantCode:      http.StatusServiceUnavailable,
