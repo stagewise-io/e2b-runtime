@@ -521,7 +521,9 @@ var (
 	ExpirationIndexHealerFlag = NewBoolFlag("expiration-index-healer", true)
 
 	// BuildEnsureFreeDiskSpace grows the rootfs after build steps and before finalize.
-	BuildEnsureFreeDiskSpace = NewBoolFlag("build-ensure-free-disk-space", false)
+	// Self-hosted cells without LaunchDarkly opt in with BUILD_ENSURE_FREE_DISK_SPACE.
+	// The environment sets the startup fallback; a live flag still takes precedence.
+	BuildEnsureFreeDiskSpace = NewBoolFlag("build-ensure-free-disk-space", envBoolOr("BUILD_ENSURE_FREE_DISK_SPACE", false))
 )
 
 // envdTimeoutFallbackMs reads ENVD_TIMEOUT (Go duration string, e.g. "10s")
