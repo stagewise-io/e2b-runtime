@@ -1120,6 +1120,13 @@ steps. Resize disk grows the quiescent rootfs on the host; the other non-cached 
 Firecracker VM and their pause-diffs become layers. The optimize phase records which memory pages a
 fresh resume touches, producing prefetch hints that speed up future sandbox starts.
 
+The resize phase is gated by `build-ensure-free-disk-space` (disabled by default).
+Self-hosted orchestrators without LaunchDarkly can set `BUILD_ENSURE_FREE_DISK_SPACE=true`
+before process startup to enable it. Unset, empty, or invalid values keep the disabled
+fallback; an evaluated LaunchDarkly flag still takes precedence. The phase honors the
+registered `minFreeDiskMb` target; enabling it does not change team limits or existing
+snapshots. Restart with the new binary and environment before building a new candidate.
+
 Template creation holds node work through foreground setup and asynchronous build completion,
 including layer uploads, synchronous cleanup, and final status publication. Cancellation can mark
 a build failed before execution finishes; the work hold remains until execution unwinds. Template
