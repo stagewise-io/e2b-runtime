@@ -182,7 +182,10 @@ func firecrackerSupports(ctx context.Context, sbx *sandbox.Sandbox, feature stri
 
 func (s *Server) Create(ctx context.Context, req *orchestrator.SandboxCreateRequest) (_ *orchestrator.SandboxCreateResponse, createErr error) {
 	defer func() { createErr = resourceAdmissionStatus(createErr) }()
-	releaseWork := s.info.TrackWork()
+	releaseWork, err := s.info.AdmitNewWork()
+	if err != nil {
+		return nil, err
+	}
 	defer releaseWork()
 
 	// set max request timeout for this request. The pre-boot journal replay runs
@@ -2339,6 +2342,9 @@ func (s *Server) uploadSnapshotAsync(ctx context.Context, sbx *sandbox.Sandbox, 
 			},
 		)
 		if err != nil {
+			// Latch before releasing the upload's work hold. A failed upload
+			// can leave the only usable snapshot on this host.
+			s.info.RecordPersistenceFailure()
 			sbxlogger.I(sbx).Error(spanCtx, "snapshot upload did not durably land", zap.Error(err))
 			s.uploadFailedCounter.Add(spanCtx, 1, metric.WithAttributes(
 				attribute.Bool("fs_only", res.filesystemOnly),

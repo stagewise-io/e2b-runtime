@@ -481,6 +481,79 @@ func (x *ResourceAdmissionFilesystem) GetHeadroomBytes() uint64 {
 	return 0
 }
 
+// Process-incarnation-scoped evidence, not host deletion authorization. Consumers
+// must bind node_id/service_id, require Draining, and complete supervised shutdown.
+// An absent report or unknown version must never be interpreted as safe to retire.
+type RetirementReport struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Version         uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	AdmissionClosed bool                   `protobuf:"varint,2,opt,name=admission_closed,json=admissionClosed,proto3" json:"admission_closed,omitempty"`
+	OutstandingWork uint64                 `protobuf:"varint,3,opt,name=outstanding_work,json=outstandingWork,proto3" json:"outstanding_work,omitempty"`
+	// Latched when an acknowledged async snapshot fails to durably land.
+	// A process restart resets this report, not the consumer's recovery obligation.
+	PersistenceFailed bool `protobuf:"varint,4,opt,name=persistence_failed,json=persistenceFailed,proto3" json:"persistence_failed,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *RetirementReport) Reset() {
+	*x = RetirementReport{}
+	mi := &file_info_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetirementReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetirementReport) ProtoMessage() {}
+
+func (x *RetirementReport) ProtoReflect() protoreflect.Message {
+	mi := &file_info_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetirementReport.ProtoReflect.Descriptor instead.
+func (*RetirementReport) Descriptor() ([]byte, []int) {
+	return file_info_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RetirementReport) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *RetirementReport) GetAdmissionClosed() bool {
+	if x != nil {
+		return x.AdmissionClosed
+	}
+	return false
+}
+
+func (x *RetirementReport) GetOutstandingWork() uint64 {
+	if x != nil {
+		return x.OutstandingWork
+	}
+	return 0
+}
+
+func (x *RetirementReport) GetPersistenceFailed() bool {
+	if x != nil {
+		return x.PersistenceFailed
+	}
+	return false
+}
+
 type ServiceInfoResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	NodeId                 string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -499,6 +572,7 @@ type ServiceInfoResponse struct {
 	MaxSandboxes int64 `protobuf:"varint,59,opt,name=max_sandboxes,json=maxSandboxes,proto3" json:"max_sandboxes,omitempty"`
 	// Includes starting and stopping physical lifecycles, unlike live metrics.
 	ResourceAdmission *ResourceAdmissionReport `protobuf:"bytes,60,opt,name=resource_admission,json=resourceAdmission,proto3" json:"resource_admission,omitempty"`
+	Retirement        *RetirementReport        `protobuf:"bytes,61,opt,name=retirement,proto3" json:"retirement,omitempty"`
 	// Deprecated: Marked as deprecated in info.proto.
 	MetricVcpuUsed int64 `protobuf:"varint,101,opt,name=metric_vcpu_used,json=metricVcpuUsed,proto3" json:"metric_vcpu_used,omitempty"`
 	// Deprecated: Marked as deprecated in info.proto.
@@ -531,7 +605,7 @@ type ServiceInfoResponse struct {
 
 func (x *ServiceInfoResponse) Reset() {
 	*x = ServiceInfoResponse{}
-	mi := &file_info_proto_msgTypes[4]
+	mi := &file_info_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -543,7 +617,7 @@ func (x *ServiceInfoResponse) String() string {
 func (*ServiceInfoResponse) ProtoMessage() {}
 
 func (x *ServiceInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_info_proto_msgTypes[4]
+	mi := &file_info_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -556,7 +630,7 @@ func (x *ServiceInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceInfoResponse.ProtoReflect.Descriptor instead.
 func (*ServiceInfoResponse) Descriptor() ([]byte, []int) {
-	return file_info_proto_rawDescGZIP(), []int{4}
+	return file_info_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ServiceInfoResponse) GetNodeId() string {
@@ -646,6 +720,13 @@ func (x *ServiceInfoResponse) GetMaxSandboxes() int64 {
 func (x *ServiceInfoResponse) GetResourceAdmission() *ResourceAdmissionReport {
 	if x != nil {
 		return x.ResourceAdmission
+	}
+	return nil
+}
+
+func (x *ServiceInfoResponse) GetRetirement() *RetirementReport {
+	if x != nil {
+		return x.Retirement
 	}
 	return nil
 }
@@ -781,7 +862,7 @@ type ServiceStatusChangeRequest struct {
 
 func (x *ServiceStatusChangeRequest) Reset() {
 	*x = ServiceStatusChangeRequest{}
-	mi := &file_info_proto_msgTypes[5]
+	mi := &file_info_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -793,7 +874,7 @@ func (x *ServiceStatusChangeRequest) String() string {
 func (*ServiceStatusChangeRequest) ProtoMessage() {}
 
 func (x *ServiceStatusChangeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_info_proto_msgTypes[5]
+	mi := &file_info_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -806,7 +887,7 @@ func (x *ServiceStatusChangeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceStatusChangeRequest.ProtoReflect.Descriptor instead.
 func (*ServiceStatusChangeRequest) Descriptor() ([]byte, []int) {
-	return file_info_proto_rawDescGZIP(), []int{5}
+	return file_info_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ServiceStatusChangeRequest) GetServiceStatus() ServiceInfoStatus {
@@ -856,7 +937,12 @@ const file_info_proto_rawDesc = "" +
 	"\x13logical_limit_bytes\x18\x06 \x01(\x04R\x11logicalLimitBytes\x126\n" +
 	"\x17logical_committed_bytes\x18\a \x01(\x04R\x15logicalCommittedBytes\x120\n" +
 	"\x14write_reserved_bytes\x18\b \x01(\x04R\x12writeReservedBytes\x12%\n" +
-	"\x0eheadroom_bytes\x18\t \x01(\x04R\rheadroomBytes\"\xa6\f\n" +
+	"\x0eheadroom_bytes\x18\t \x01(\x04R\rheadroomBytes\"\xb1\x01\n" +
+	"\x10RetirementReport\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\rR\aversion\x12)\n" +
+	"\x10admission_closed\x18\x02 \x01(\bR\x0fadmissionClosed\x12)\n" +
+	"\x10outstanding_work\x18\x03 \x01(\x04R\x0foutstandingWork\x12-\n" +
+	"\x12persistence_failed\x18\x04 \x01(\bR\x11persistenceFailed\"\xd9\f\n" +
 	"\x13ServiceInfoResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1d\n" +
 	"\n" +
@@ -871,7 +957,10 @@ const file_info_proto_rawDesc = "" +
 	"\x19service_status_changed_at\x188 \x01(\v2\x1a.google.protobuf.TimestampR\x16serviceStatusChangedAt\x12)\n" +
 	"\x10outstanding_work\x18: \x01(\x04R\x0foutstandingWork\x12#\n" +
 	"\rmax_sandboxes\x18; \x01(\x03R\fmaxSandboxes\x12G\n" +
-	"\x12resource_admission\x18< \x01(\v2\x18.ResourceAdmissionReportR\x11resourceAdmission\x12,\n" +
+	"\x12resource_admission\x18< \x01(\v2\x18.ResourceAdmissionReportR\x11resourceAdmission\x121\n" +
+	"\n" +
+	"retirement\x18= \x01(\v2\x11.RetirementReportR\n" +
+	"retirement\x12,\n" +
 	"\x10metric_vcpu_used\x18e \x01(\x03B\x02\x18\x01R\x0emetricVcpuUsed\x125\n" +
 	"\x15metric_memory_used_mb\x18f \x01(\x03B\x02\x18\x01R\x12metricMemoryUsedMb\x12(\n" +
 	"\x0emetric_disk_mb\x18g \x01(\x03B\x02\x18\x01R\fmetricDiskMb\x128\n" +
@@ -917,7 +1006,7 @@ func file_info_proto_rawDescGZIP() []byte {
 }
 
 var file_info_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_info_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_info_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_info_proto_goTypes = []any{
 	(ServiceInfoStatus)(0),              // 0: ServiceInfoStatus
 	(ServiceInfoRole)(0),                // 1: ServiceInfoRole
@@ -925,30 +1014,32 @@ var file_info_proto_goTypes = []any{
 	(*MachineInfo)(nil),                 // 3: MachineInfo
 	(*ResourceAdmissionReport)(nil),     // 4: ResourceAdmissionReport
 	(*ResourceAdmissionFilesystem)(nil), // 5: ResourceAdmissionFilesystem
-	(*ServiceInfoResponse)(nil),         // 6: ServiceInfoResponse
-	(*ServiceStatusChangeRequest)(nil),  // 7: ServiceStatusChangeRequest
-	(*timestamppb.Timestamp)(nil),       // 8: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),               // 9: google.protobuf.Empty
+	(*RetirementReport)(nil),            // 6: RetirementReport
+	(*ServiceInfoResponse)(nil),         // 7: ServiceInfoResponse
+	(*ServiceStatusChangeRequest)(nil),  // 8: ServiceStatusChangeRequest
+	(*timestamppb.Timestamp)(nil),       // 9: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),               // 10: google.protobuf.Empty
 }
 var file_info_proto_depIdxs = []int32{
 	5,  // 0: ResourceAdmissionReport.filesystems:type_name -> ResourceAdmissionFilesystem
 	0,  // 1: ServiceInfoResponse.service_status:type_name -> ServiceInfoStatus
 	1,  // 2: ServiceInfoResponse.service_roles:type_name -> ServiceInfoRole
-	8,  // 3: ServiceInfoResponse.service_startup:type_name -> google.protobuf.Timestamp
+	9,  // 3: ServiceInfoResponse.service_startup:type_name -> google.protobuf.Timestamp
 	3,  // 4: ServiceInfoResponse.machine_info:type_name -> MachineInfo
-	8,  // 5: ServiceInfoResponse.service_status_changed_at:type_name -> google.protobuf.Timestamp
+	9,  // 5: ServiceInfoResponse.service_status_changed_at:type_name -> google.protobuf.Timestamp
 	4,  // 6: ServiceInfoResponse.resource_admission:type_name -> ResourceAdmissionReport
-	2,  // 7: ServiceInfoResponse.metric_disks:type_name -> DiskMetrics
-	0,  // 8: ServiceStatusChangeRequest.service_status:type_name -> ServiceInfoStatus
-	9,  // 9: InfoService.ServiceInfo:input_type -> google.protobuf.Empty
-	7,  // 10: InfoService.ServiceStatusOverride:input_type -> ServiceStatusChangeRequest
-	6,  // 11: InfoService.ServiceInfo:output_type -> ServiceInfoResponse
-	9,  // 12: InfoService.ServiceStatusOverride:output_type -> google.protobuf.Empty
-	11, // [11:13] is the sub-list for method output_type
-	9,  // [9:11] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	6,  // 7: ServiceInfoResponse.retirement:type_name -> RetirementReport
+	2,  // 8: ServiceInfoResponse.metric_disks:type_name -> DiskMetrics
+	0,  // 9: ServiceStatusChangeRequest.service_status:type_name -> ServiceInfoStatus
+	10, // 10: InfoService.ServiceInfo:input_type -> google.protobuf.Empty
+	8,  // 11: InfoService.ServiceStatusOverride:input_type -> ServiceStatusChangeRequest
+	7,  // 12: InfoService.ServiceInfo:output_type -> ServiceInfoResponse
+	10, // 13: InfoService.ServiceStatusOverride:output_type -> google.protobuf.Empty
+	12, // [12:14] is the sub-list for method output_type
+	10, // [10:12] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_info_proto_init() }
@@ -962,7 +1053,7 @@ func file_info_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_info_proto_rawDesc), len(file_info_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

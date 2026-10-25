@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/cfg"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/service/machineinfo"
@@ -35,9 +37,10 @@ type ServiceInfo struct {
 	MachineInfo  machineinfo.MachineInfo
 	MaxSandboxes atomic.Int64
 
-	status          ServiceStatus
-	statusMu        sync.RWMutex
-	outstandingWork int64
+	status            ServiceStatus
+	statusMu          sync.RWMutex
+	outstandingWork   int64
+	persistenceFailed bool
 }
 
 var serviceRolesMapper = map[cfg.ServiceType]orchestratorinfo.ServiceInfoRole{
@@ -50,6 +53,41 @@ func (s *ServiceInfo) GetStatus() ServiceStatus {
 	defer s.statusMu.RUnlock()
 
 	return s.status
+}
+
+// AdmitNewWork closes the stale-placement race by registering a start under the
+// same lock as status changes. Only external starts use this gate; children of
+// admitted work and operations on existing sandboxes must keep using TrackWork.
+func (s *ServiceInfo) AdmitNewWork() (func(), error) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+
+	if s.status.Status != orchestratorinfo.ServiceInfoStatus_Healthy {
+		return nil, status.Error(codes.ResourceExhausted, "node is not accepting new work, please retry")
+	}
+	s.outstandingWork++
+
+	return s.finishWork, nil
+}
+
+// RecordPersistenceFailure blocks retirement for this process incarnation. A
+// finished upload is not necessarily durable. Healthy overrides cannot clear it.
+func (s *ServiceInfo) RecordPersistenceFailure() {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+
+	s.persistenceFailed = true
+}
+
+// retirementReportLocked requires statusMu. All fields describe the same cut.
+// It is evidence for a supervised retirement, never permission to delete a host.
+func (s *ServiceInfo) retirementReportLocked() *orchestratorinfo.RetirementReport {
+	return &orchestratorinfo.RetirementReport{
+		Version:           1,
+		AdmissionClosed:   s.status.Status != orchestratorinfo.ServiceInfoStatus_Healthy,
+		OutstandingWork:   uint64(s.outstandingWork),
+		PersistenceFailed: s.persistenceFailed,
+	}
 }
 
 // Child work must be registered before its parent releases ownership.

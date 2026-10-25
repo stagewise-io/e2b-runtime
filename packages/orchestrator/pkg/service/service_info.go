@@ -77,6 +77,7 @@ func (s *Server) ServiceInfo(ctx context.Context, _ *emptypb.Empty) (*orchestrat
 	info.statusMu.RLock()
 	serviceStatus := info.status
 	outstandingWork := uint64(info.outstandingWork)
+	retirementReport := info.retirementReportLocked()
 	info.statusMu.RUnlock()
 
 	var admissionReport *orchestratorinfo.ResourceAdmissionReport
@@ -86,6 +87,7 @@ func (s *Server) ServiceInfo(ctx context.Context, _ *emptypb.Empty) (*orchestrat
 
 	return &orchestratorinfo.ServiceInfoResponse{
 		ResourceAdmission:      admissionReport,
+		Retirement:             retirementReport,
 		NodeId:                 info.ClientId,
 		ServiceId:              info.ServiceId,
 		ServiceStatus:          serviceStatus.Status,
