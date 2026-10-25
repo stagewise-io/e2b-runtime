@@ -20,16 +20,39 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/metrics"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/build"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/template"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/service"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
 	"github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator"
+	orchestratorinfo "github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator-info"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 	"github.com/e2b-dev/infra/packages/shared/pkg/utils"
 )
+
+func TestCreateRejectsNonHealthyNodeBeforeSetup(t *testing.T) {
+	t.Parallel()
+
+	for value, name := range orchestratorinfo.ServiceInfoStatus_name {
+		if value == int32(orchestratorinfo.ServiceInfoStatus_Healthy) {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			info := &service.ServiceInfo{}
+			info.SetStatus(t.Context(), orchestratorinfo.ServiceInfoStatus(value))
+			s := &Server{info: info}
+			response, err := s.Create(t.Context(), nil)
+			require.Equal(t, codes.ResourceExhausted, status.Code(err))
+			require.Nil(t, response)
+			require.Zero(t, info.OutstandingWork())
+		})
+	}
+}
 
 func TestCreateTracksWorkUntilCanceled(t *testing.T) {
 	t.Parallel()
@@ -163,6 +186,15 @@ func TestUploadSnapshotAsyncTracksWorkThroughCompletion(t *testing.T) {
 				}
 				require.Equal(t, int64(1), s.info.OutstandingWork(), "finished upload must retain work through completion cleanup")
 				require.Equal(t, int64(1), s.uploadsInFlight.Load())
+				infoServer := service.NewInfoService(s.info, sandbox.NewSandboxesMap(), metrics.NewHostMetrics())
+				checkPersistenceFailure := func() {
+					t.Helper()
+					response, infoErr := infoServer.ServiceInfo(t.Context(), &emptypb.Empty{})
+					require.NoError(t, infoErr)
+					require.NotNil(t, response.GetRetirement())
+					require.Equal(t, tc.firstErr != nil && !tc.retry, response.GetRetirement().GetPersistenceFailed())
+				}
+				checkPersistenceFailure()
 
 				waitReturned := false
 				go func() {
@@ -177,6 +209,7 @@ func TestUploadSnapshotAsyncTracksWorkThroughCompletion(t *testing.T) {
 				require.Equal(t, 1, completeCalls)
 				require.Zero(t, s.info.OutstandingWork())
 				require.Zero(t, s.uploadsInFlight.Load())
+				checkPersistenceFailure()
 			})
 		})
 	}

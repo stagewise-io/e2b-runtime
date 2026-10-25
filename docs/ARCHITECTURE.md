@@ -296,6 +296,25 @@ this report and exposes it as required top-level `outstandingWork` in admin node
 responses, where zero also covers a node that has not reported. This observational count does not
 by itself authorize node deletion.
 
+External `SandboxService.Create` and `TemplateService.TemplateCreate` starts are admitted
+only while the local status is `Healthy`. Admission and work registration share the status
+lock, so a concurrent drain either counts the admitted start or refuses it before setup with
+retryable gRPC `ResourceExhausted`, even when an API replica still sees the node as healthy.
+Children of admitted work and existing-sandbox operations remain allowed during drain.
+
+The additive `ServiceInfoResponse.retirement` version 1 report takes `admission_closed`,
+`outstanding_work`, and `persistence_failed` under the same lock as the reported status.
+An acknowledged background snapshot upload that exhausts retries or fails permanently latches
+`persistence_failed` before releasing its work hold. Success on another upload and a status
+override cannot clear the latch. The report is process-local evidence, not a host deletion
+permit. Consumers must bind it to `node_id`, `service_id`, and startup, require a fresh report
+from a node kept in `Draining`, no live sandboxes, zero work and no persistence failure,
+and complete supervised shutdown before host deletion. Missing or unknown report versions,
+unreachable nodes, process restarts and lost evidence are not proof of safety. Restart resets
+the in-memory report but cannot establish that an earlier process's snapshots landed.
+Operators must recover or explicitly account for failed persistence before replacing a host.
+This PR adds neither a host-replacement controller nor an automatic restart/recovery policy.
+
 `InfoService.ServiceInfo.max_sandboxes` reports the cached node limit for every service role.
 Admin `/nodes` and `/nodes/{nodeID}` return required `maxSandboxes`, including zero. Admission,
 metrics, and node info share the value refreshed from node-scoped flags every 30 seconds.

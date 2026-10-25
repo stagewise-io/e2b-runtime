@@ -28,6 +28,7 @@ import (
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/template/build/metrics"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/template/cache"
 	"github.com/e2b-dev/infra/packages/shared/pkg/featureflags"
+	orchestratorinfo "github.com/e2b-dev/infra/packages/shared/pkg/grpc/orchestrator-info"
 	templatemanager "github.com/e2b-dev/infra/packages/shared/pkg/grpc/template-manager"
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
@@ -91,6 +92,26 @@ func blockTemplateCleanup(t *testing.T, provider *storage.MockStorageProvider, b
 		}).Once()
 
 	return started, release
+}
+
+func TestTemplateCreateRejectsNonHealthyNodeBeforeSetup(t *testing.T) {
+	t.Parallel()
+
+	for value, name := range orchestratorinfo.ServiceInfoStatus_name {
+		if value == int32(orchestratorinfo.ServiceInfoStatus_Healthy) {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			info := &service.ServiceInfo{}
+			info.SetStatus(t.Context(), orchestratorinfo.ServiceInfoStatus(value))
+			s := &ServerStore{info: info}
+			response, err := s.TemplateCreate(t.Context(), nil)
+			require.Equal(t, codes.ResourceExhausted, status.Code(err))
+			require.Nil(t, response)
+			require.Zero(t, info.OutstandingWork())
+		})
+	}
 }
 
 func TestTemplateCreateRejectionReleasesWork(t *testing.T) {

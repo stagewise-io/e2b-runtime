@@ -48,7 +48,10 @@ var (
 )
 
 func (s *ServerStore) TemplateCreate(ctx context.Context, templateRequest *templatemanager.TemplateCreateRequest) (*emptypb.Empty, error) {
-	done := s.info.TrackWork()
+	done, admissionErr := s.info.AdmitNewWork()
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	defer done()
 
 	ctx, childSpan := tracer.Start(ctx, "template-create")

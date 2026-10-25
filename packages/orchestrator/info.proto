@@ -61,6 +61,18 @@ message ResourceAdmissionFilesystem {
   uint64 headroom_bytes = 9;
 }
 
+// Process-incarnation-scoped evidence, not host deletion authorization. Consumers
+// must bind node_id/service_id, require Draining, and complete supervised shutdown.
+// An absent report or unknown version must never be interpreted as safe to retire.
+message RetirementReport {
+  uint32 version = 1;
+  bool admission_closed = 2;
+  uint64 outstanding_work = 3;
+  // Latched when an acknowledged async snapshot fails to durably land.
+  // A process restart resets this report, not the consumer's recovery obligation.
+  bool persistence_failed = 4;
+}
+
 message ServiceInfoResponse {
   string node_id = 1;
   string service_id = 2;
@@ -82,6 +94,8 @@ message ServiceInfoResponse {
 
   // Includes starting and stopping physical lifecycles, unlike live metrics.
   ResourceAdmissionReport resource_admission = 60;
+
+  RetirementReport retirement = 61;
 
   int64 metric_vcpu_used = 101 [deprecated = true];
   int64 metric_memory_used_mb = 102 [deprecated = true];
