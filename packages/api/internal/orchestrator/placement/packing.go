@@ -49,10 +49,12 @@ func packingScore(node *nodemanager.Node, resources nodemanager.SandboxResources
 				committed += pagesFor(res.MiBMemory)
 			}
 		}
-		if limit <= 0 || committed > limit {
+		if limit <= 0 || (memory.Limit > 0 && committed > limit) {
 			return 0, false
 		}
-		score += (limit - committed) / limit
+		// A disabled placement ceiling leaves admission to the host. Do not
+		// reward commitments beyond the reported pool with a negative score.
+		score += max(0, limit-committed) / limit
 		dimensions++
 	}
 
