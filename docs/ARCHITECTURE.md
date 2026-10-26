@@ -83,6 +83,26 @@ flowchart TB
     TM --> OS
 ```
 
+## Klex supervised runtime delivery
+
+The opt-in `klex-publish-supervised-runtime.yml` workflow assembles an existing,
+digest-pinned host-binary bundle with a cell-local, digest-pinned Cloud host
+supervisor image. The resulting image owns `/opt/e2b/orchestrator` and
+`clean-nfs-cache`; the supervisor remains PID 1 and owns child startup, draining,
+and shutdown. Source identities and both input digests are recorded in
+`/opt/e2b/runtime-release.json`. Publication verifies checksums, architecture,
+dynamic library resolution and the supervisor's fixture shutdown smoke test.
+Startup rejects chart identities or a cell that differs from the image.
+
+GitOps selects the assembled image independently of Infra's legacy binary
+bootstrap. Infra still owns KVM, kernels, Firecracker, envd, host tools, hugepages,
+mounts and IAM. Legacy deployment remains the default. Image-backed GitOps
+uses `OnDelete`, so publication and image promotion cannot automatically restart
+busy hosts. Initial cutover and rollback require maintenance and verified-empty
+hosts; automated workload-aware host rollover is not implemented here.
+
+See [supervised-runtime.md](supervised-runtime.md) for publication and cutover.
+
 ## Services
 
 | Service | Package | Runs on | Purpose |

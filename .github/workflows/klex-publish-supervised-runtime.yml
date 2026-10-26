@@ -1,0 +1,157 @@
+# Assembly only. Does not install on hosts or change GitOps.
+name: Klex Publish Supervised Runtime
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/klex-publish-supervised-runtime.yml
+      - packages/orchestrator/supervised-runtime.Dockerfile
+      - packages/orchestrator/verify-supervised-runtime.cjs
+      - scripts/*supervised*runtime*
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target cell registry
+        type: choice
+        options: [preview, production]
+        default: preview
+        required: true
+      bundle_digest:
+        description: Published orchestrator host-binary bundle digest, sha256:...
+        required: true
+        type: string
+      bundle_commit:
+        description: Full merged runtime source commit from release.json
+        required: true
+        type: string
+      bundle_version:
+        description: Runtime version from release.json
+        required: true
+        type: string
+      supervisor_digest:
+        description: Published cell-local supervisor image digest, sha256:...
+        required: true
+        type: string
+      supervisor_commit:
+        description: Full Cloud source commit matching the supervisor image label
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supervised-runtime-${{ inputs.environment || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s scripts -p test_supervised_runtime_release.py
+      - run: bash scripts/test-supervised-runtime-image.sh
+
+  publish:
+    needs: contracts
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'stagewise-io/e2b-runtime' && github.ref == 'refs/heads/klex/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable cell-local inputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          REPOSITORY_URLS: ${{ vars.AWS_ECR_REPOSITORY_URLS }}
+          BUNDLE_DIGEST: ${{ inputs.bundle_digest }}
+          BUNDLE_COMMIT: ${{ inputs.bundle_commit }}
+          BUNDLE_VERSION: ${{ inputs.bundle_version }}
+          SUPERVISOR_DIGEST: ${{ inputs.supervisor_digest }}
+          SUPERVISOR_COMMIT: ${{ inputs.supervisor_commit }}
+          ASSEMBLY_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir runtime-context
+          python3 scripts/supervised_runtime_release.py >runtime-context/runtime-release.json
+          git merge-base --is-ancestor "$BUNDLE_COMMIT" HEAD
+          cp packages/orchestrator/verify-supervised-runtime.cjs runtime-context/
+      - uses: aws-actions/configure-aws-credentials@4a1596c86fd706dc0521e32f0121ad1a6d1adb74 # v6
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_ECR_REGION }}
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
+      - name: Verify input images and assemble or reuse release
+        id: release
+        run: |
+          set -euo pipefail
+          plan=runtime-context/runtime-release.json
+          bundle="$(jq -er .bundleImage "$plan")"
+          supervisor="$(jq -er .supervisorImage "$plan")"
+          image="$(jq -er .image "$plan")"
+          for input in "$bundle" "$supervisor"; do docker pull --platform linux/amd64 "$input"; done
+          test "$(docker image inspect "$bundle" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(jq -r .runtimeCommit "$plan")"
+          test "$(docker image inspect "$supervisor" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(jq -r .supervisorCommit "$plan")"
+          repository="${image%:*}"
+          repository="${repository#*/}"
+          tag="${image##*:}"
+          if aws ecr describe-images --repository-name "$repository" --image-ids imageTag="$tag" >existing.json 2>existing.err; then
+            digest="$(jq -er '.imageDetails[0].imageDigest' existing.json)"
+            candidate="${image%:*}@$digest"
+            docker pull --platform linux/amd64 "$candidate"
+            echo 'reused=true' >>"$GITHUB_OUTPUT"
+          elif grep -q '(ImageNotFoundException)' existing.err; then
+            docker buildx build --platform linux/amd64 --load --provenance=false \
+              --file packages/orchestrator/supervised-runtime.Dockerfile \
+              --build-arg BUNDLE_IMAGE="$bundle" --build-arg SUPERVISOR_IMAGE="$supervisor" \
+              --build-arg ASSEMBLY_COMMIT="$(jq -r .assemblyCommit "$plan")" \
+              --build-arg BUNDLE_COMMIT="$(jq -r .runtimeCommit "$plan")" \
+              --build-arg SUPERVISOR_COMMIT="$(jq -r .supervisorCommit "$plan")" \
+              --tag "$image" runtime-context
+            candidate="$image"
+            echo 'reused=false' >>"$GITHUB_OUTPUT"
+          else
+            cat existing.err >&2
+            exit 1
+          fi
+          # Check the exact candidate, including the reuse path, before pushing.
+          docker run --rm --platform linux/amd64 --entrypoint cat "$candidate" /opt/e2b/runtime-release.json >actual-release.json
+          cmp "$plan" actual-release.json
+          docker run --rm --platform linux/amd64 --entrypoint node "$candidate" /opt/e2b/verify-supervised-runtime.cjs
+          docker run --rm --platform linux/amd64 --entrypoint node "$candidate" /app/smoke.cjs
+          if test "$candidate" = "$image"; then
+            docker push "$image"
+            digest="$(aws ecr describe-images --repository-name "$repository" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text)"
+          fi
+          immutable="${image%:*}@$digest"
+          jq --arg image "$immutable" '. + {publishedImage: $image}' "$plan" >runtime-context/published-release.json
+          echo "image=$immutable" >>"$GITHUB_OUTPUT"
+      - name: Release summary
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          REUSED: ${{ steps.release.outputs.reused }}
+        run: |
+          {
+            echo '### Supervised runtime release'
+            echo "Image: \`$IMAGE\`"
+            echo "Reused existing image: \`$REUSED\`"
+            echo '```json'
+            cat runtime-context/runtime-release.json
+            echo '```'
+            echo 'Publication does not restart hosts, change GitOps or enable retirement.'
+            echo 'Use a verified-empty maintenance cutover before selecting this image.'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: supervised-runtime-release-${{ inputs.environment }}
+          path: runtime-context/*.json
