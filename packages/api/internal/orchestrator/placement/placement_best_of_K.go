@@ -278,7 +278,13 @@ func (b *BestOfK) sample(items []*nodemanager.Node, config BestOfKConfig, exclud
 			continue
 		}
 
-		if !NodeSatisfiesMemory(n, resources, requirements.Memory) || !NodeSatisfiesResources(n, resources, requirements.ResourceAdmission) {
+		fits := NodeSatisfiesMemory(n, resources, requirements.Memory)
+		if fits && requirements.ResourceAdmission {
+			// Apply packing's pool checks before consuming a sample slot.
+			// Legacy memory admission can be disabled or allow unreported pools.
+			_, fits = packingScore(n, resources, requirements.Memory)
+		}
+		if !fits {
 			poolsFull = true
 
 			continue

@@ -206,8 +206,10 @@ The control-plane entry point (Gin, OpenAPI-generated from `spec/openapi.yml`, p
   minimizing mean normalized capacity left after the request. CPU and logical
   rootfs disk use the host's admission limits. Hugepage requests also include
   remaining pool capacity after the configured placement limit, with per-request
-  page rounding; missing pools are unavailable. Ordinary-page requests omit that
-  dimension. Physical disk headroom is a fit check, never a packing incentive.
+  page rounding; missing pools are unavailable and do not consume a sample slot.
+  A non-positive placement limit disables the hugepage ceiling check, leaving final
+  admission to the host; remaining hugepage capacity is clamped at zero for scoring.
+  Ordinary-page requests omit that dimension. Physical disk headroom is a fit check, never a packing incentive.
   Packing ignores the legacy scoring ratio, alpha and hugepage-scoring toggle.
   Equal scores break by node ID within the sample. A larger fleet therefore gets
   approximate consolidation, not a search for the globally fullest fitting host.

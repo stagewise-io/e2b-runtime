@@ -76,6 +76,66 @@ func TestPackingHonorsSampleSize(t *testing.T) {
 	require.True(t, seenEmpty, "packing must not expand K to the fleet size")
 }
 
+func TestPackingSamplesOnlyFittingHugepagePools(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		info *orchestratorinfo.ServiceInfoResponse
+	}{
+		{name: "unreported pool", info: &orchestratorinfo.ServiceInfoResponse{}},
+		{name: "unreported page size", info: &orchestratorinfo.ServiceInfoResponse{MetricHugepagesCapacity: 1000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			config := DefaultBestOfKConfig()
+			config.K = 1
+			algorithm := &BestOfK{config: config}
+			resources := nodemanager.SandboxResources{CPUs: 2, MiBDisk: 100, MiBMemory: 200, HugePages: true}
+			requirements := Requirements{ResourceAdmission: true}
+			info := tc.info
+			report := admissionReport()
+			info.ResourceAdmission = report.Proto()
+			bad := nodemanager.NewTestNode("bad", api.NodeStatusReady, 0, 8)
+			bad.UpdateMetricsFromSync(info, time.Now())
+			good := packingNode("good", 0, 0, 0, api.NodeStatusReady)
+			nodes := []*nodemanager.Node{bad, good}
+			// The legacy check allows these hosts with its limit disabled.
+			require.True(t, NodeSatisfiesMemory(bad, resources, requirements.Memory))
+			for range 100 {
+				candidates, _ := algorithm.sample(nodes, config, nil, resources, requirements, false, nil)
+				require.Len(t, candidates, 1)
+				require.Equal(t, good.ID, candidates[0].ID)
+				chosen, err := algorithm.chooseNode(t.Context(), nodes, nil, resources, requirements, false, nil)
+				require.NoError(t, err)
+				require.Equal(t, good.ID, chosen.ID)
+			}
+			candidates, poolsFull := algorithm.sample([]*nodemanager.Node{bad}, config, nil, resources, requirements, false, nil)
+			require.Empty(t, candidates)
+			require.True(t, poolsFull)
+			_, err := algorithm.chooseNode(t.Context(), []*nodemanager.Node{bad}, nil, resources, requirements, false, nil)
+			require.ErrorAs(t, err, new(NoNodesAvailableError))
+		})
+	}
+}
+
+func TestPackingHonorsDisabledHugepageLimit(t *testing.T) {
+	t.Parallel()
+	resources := nodemanager.SandboxResources{CPUs: 2, MiBDisk: 100, MiBMemory: 200, HugePages: true}
+	full := packingNode("full", 0, 0, 1000, api.NodeStatusReady)
+	for _, limit := range []float64{0, -1} {
+		score, fits := packingScore(full, resources, MemoryRequirement{Limit: limit})
+		require.True(t, fits)
+		require.InDelta(t, (0.9+0.875)/3, score, 1e-12)
+		chosen, err := NewBestOfK(DefaultBestOfKConfig()).chooseNode(t.Context(), []*nodemanager.Node{full}, nil, resources, Requirements{ResourceAdmission: true, Memory: MemoryRequirement{Limit: limit}}, false, nil)
+		require.NoError(t, err)
+		require.Equal(t, full.ID, chosen.ID)
+	}
+	for _, limit := range []float64{0.95, 1} {
+		_, fits := packingScore(full, resources, MemoryRequirement{Limit: limit})
+		require.False(t, fits)
+	}
+}
+
 func TestPackingScoreUsesRequestedResourcesAndLimits(t *testing.T) {
 	t.Parallel()
 	n := packingNode("n", 10, 300, 0, api.NodeStatusReady)
