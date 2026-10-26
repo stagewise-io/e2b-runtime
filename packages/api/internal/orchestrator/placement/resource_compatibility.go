@@ -38,17 +38,24 @@ func NodeSatisfiesResources(node *nodemanager.Node, resources nodemanager.Sandbo
 	if !enabled {
 		return true
 	}
+	_, _, fits := fittingResourceView(node, resources)
+
+	return fits
+}
+
+// fittingResourceView keeps scoring and admission on the same validated snapshot.
+func fittingResourceView(node *nodemanager.Node, resources nodemanager.SandboxResources) (*resourceadmission.Report, resourceadmission.Resources, bool) {
 	report, requestedAt, pending, err := node.AdmissionView()
 	if err != nil || report == nil || requestedAt.IsZero() {
-		return false
+		return nil, pending, false
 	}
 	age := time.Since(requestedAt)
 	if age < 0 || age > admissionMaxSampleAge {
-		return false
+		return nil, pending, false
 	}
 	request, err := resourceadmission.FromMiB(resources.CPUs, resources.MiBDisk)
 
-	return err == nil && report.Fit(request, pending) == nil
+	return report, pending, err == nil && report.Fit(request, pending) == nil
 }
 
 func anyNodeSupportsResourceAdmission(nodes []*nodemanager.Node, enabled bool) bool {

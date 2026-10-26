@@ -183,15 +183,15 @@ The control-plane entry point (Gin, OpenAPI-generated from `spec/openapi.yml`, p
   orchestrator re-sync; a fork starts a new workload and does not inherit them.
 - **Placement**: keeps a live map of orchestrator nodes (discovered via Nomad, Kubernetes, or a
   static list). Chooses a node per sandbox with a **best-of-K** algorithm
-  (`internal/orchestrator/placement/`): sample K ready nodes, score by the
-  higher of CPU load and hugepage-pool load, pick the lowest; retry on
-  exhausted nodes. A node that refuses a create (`ResourceExhausted`) stays
-  eligible, and each refusal waits a full-jitter backoff that doubles up to a
-  cap, so a placement that finds every node busy does not re-send creates as
-  fast as they are refused. A node that reports no pool scores 0.5. Hugepage scoring
-  is on by default (`BEST_OF_K_HUGEPAGE_MEMORY`); set it false to rank on
-  CPU alone. K, overcommit ratio, and alpha are tunable live via feature
-  flags. With `placement-hugepage-limit-percent` above 0, a hugepage sandbox
+  (`internal/orchestrator/placement/`): sample at most K eligible ready nodes,
+  then pick the lowest score within that sample. K defaults to 3 and remains
+  tunable live via feature flags. Placement considers the whole eligible fleet
+  only when it has at most K hosts. Each capacity refusal (`ResourceExhausted`)
+  waits a full-jitter backoff that doubles up to a cap.
+  Without resource admission, the score is the higher of CPU load and hugepage-pool
+  load. A node reporting no pool scores 0.5. Hugepage scoring is on by default
+  (`BEST_OF_K_HUGEPAGE_MEMORY`); set it false to rank on CPU alone. The legacy
+  overcommit ratio and alpha remain tunable via feature flags. With `placement-hugepage-limit-percent` above 0, a hugepage sandbox
   is also refused by any node whose committed hugepages would pass that share
   of the node's pool ceiling (base pool plus overcommit allowance, reported by
   the orchestrator); within an API replica the check and the in-flight record
@@ -202,9 +202,21 @@ The control-plane entry point (Gin, OpenAPI-generated from `spec/openapi.yml`, p
   resumes. Reports must be locally requested within 30 seconds. Missing or disabled
   support is a capability mismatch; stale or invalid reports are temporary capacity
   shortages. Disk demand is the total rootfs size, not requested template free space.
-  Successful per-attempt overlays remain until a report requested after success arrives;
-  deletes never subtract authoritative commitments. The orchestrator remains the authority
-  across independent API replicas.
+  With resource admission, scoring packs within the same bounded K sample by
+  minimizing mean normalized capacity left after the request. CPU and logical
+  rootfs disk use the host's admission limits. Hugepage requests also include
+  remaining pool capacity after the configured placement limit, with per-request
+  page rounding; missing pools are unavailable. Ordinary-page requests omit that
+  dimension. Physical disk headroom is a fit check, never a packing incentive.
+  Packing ignores the legacy scoring ratio, alpha and hugepage-scoring toggle.
+  Equal scores break by node ID within the sample. A larger fleet therefore gets
+  approximate consolidation, not a search for the globally fullest fitting host.
+  Refused hosts are skipped until other eligible hosts have been considered, then
+  become retryable again under the same backoff. Resume affinity still wins when
+  the origin is ready and fits; draining hosts are excluded at selection and the
+  final pending insert. Successful per-attempt overlays remain until a report
+  requested after success arrives; deletes never subtract authoritative commitments.
+  The orchestrator remains the authority across independent API replicas.
 - **State**: writes sandbox records to Redis (source of truth for *running* sandboxes). It does
   not write routing: client-proxy reads the orchestrator-written `sandbox:routing:{id}` (see
   "Sandbox routing records"). Persistent entities (templates, builds, snapshots, teams) live in
@@ -1037,7 +1049,8 @@ sequenceDiagram
   the build row records a failure the node may have gone on to complete.
 - **Fork**: checkpoints the original in place, then starts each fork from that snapshot as a
   new sandbox rather than a resume — like a sandbox created from a snapshot template — so
-  placement spreads the forks across nodes instead of preferring the original's node.
+  placement scores forks normally instead of preferring the original's node.
+  Resource-admitted forks use packing within the sampled candidates.
 - **Filesystem-only checkpoint**: `memory: false` on snapshot-template creation exports the
   rootfs and no memfile, resumes the same Firecracker process, and produces a template whose
   sandboxes cold-boot; the source keeps running. Routed by its own flag,
