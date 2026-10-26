@@ -108,6 +108,9 @@ func placeSandbox(
 	defer span.End()
 
 	nodesExcluded := make(map[string]struct{})
+	// Packing has a deterministic winner. Try other hosts after a capacity
+	// refusal before reconsidering that winner against potentially stale data.
+	nodesRefused := make(map[string]struct{})
 	var err error
 
 	resources := nodemanager.SandboxResources{
@@ -215,7 +218,23 @@ func placeSandbox(
 				return failed(NoNodesAvailableError{})
 			}
 
-			node, err = algorithm.chooseNode(ctx, clusterNodes, nodesExcluded, resources, requirements, labelFilteringEnabled, requiredLabels)
+			selectionExcluded := nodesExcluded
+			if requirements.ResourceAdmission && len(nodesRefused) > 0 {
+				selectionExcluded = make(map[string]struct{}, len(nodesExcluded)+len(nodesRefused))
+				for id := range nodesExcluded {
+					selectionExcluded[id] = struct{}{}
+				}
+				for id := range nodesRefused {
+					selectionExcluded[id] = struct{}{}
+				}
+			}
+			node, err = algorithm.chooseNode(ctx, clusterNodes, selectionExcluded, resources, requirements, labelFilteringEnabled, requiredLabels)
+			if err != nil && requirements.ResourceAdmission && len(nodesRefused) > 0 {
+				// All other eligible hosts were tried or cannot currently fit.
+				// Capacity refusals remain retryable under the existing backoff.
+				clear(nodesRefused)
+				node, err = algorithm.chooseNode(ctx, clusterNodes, nodesExcluded, resources, requirements, labelFilteringEnabled, requiredLabels)
+			}
 			if err != nil {
 				// A create was already attempted: its error explains the failure
 				// better than the empty candidate set it caused.
@@ -235,7 +254,13 @@ func placeSandbox(
 
 		chosen := node
 		placementAttempt := node.PlacementMetrics.BeginPlacingIf(sbxRequest.GetSandbox().GetSandboxId(), resources, func() bool {
-			return NodeSatisfiesMemory(chosen, resources, requirements.Memory) && NodeSatisfiesResources(chosen, resources, requirements.ResourceAdmission)
+			if requirements.ResourceAdmission {
+				_, fits := packingScore(chosen, resources, requirements.Memory)
+
+				return chosen.CanAcceptNewRequests() && fits && NodeSatisfiesMemory(chosen, resources, requirements.Memory)
+			}
+
+			return NodeSatisfiesMemory(chosen, resources, requirements.Memory) && NodeSatisfiesResources(chosen, resources, false)
 		})
 		if placementAttempt == nil {
 			telemetry.ReportEvent(ctx, "Node resource capacity unavailable", telemetry.WithNodeID(node.ID))
@@ -290,6 +315,7 @@ func placeSandbox(
 		switch statusCode {
 		case codes.ResourceExhausted:
 			refusals++
+			nodesRefused[failedNode.ID] = struct{}{}
 			placementAttempt.Skip()
 
 			delay := backoff.delay(refusals)

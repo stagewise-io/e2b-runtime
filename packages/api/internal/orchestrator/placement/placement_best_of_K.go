@@ -94,7 +94,8 @@ func memoryScore(metrics nodemanager.Metrics, resources nodemanager.SandboxResou
 	return (requested + committed + config.Alpha*used) / poolBytes
 }
 
-// BestOfK implements the fit-score-place algorithm
+// BestOfK samples at most K eligible nodes, packing resource-admitted requests
+// within that sample and load-balancing legacy requests.
 type BestOfK struct {
 	config BestOfKConfig
 	mu     sync.RWMutex
@@ -136,9 +137,20 @@ func (b *BestOfK) chooseNode(_ context.Context, nodes []*nodemanager.Node, exclu
 
 	for _, node := range candidates {
 		// Calculate score
-		score := b.Score(node, resources, config)
+		var score float64
+		if requirements.ResourceAdmission {
+			var fits bool
+			score, fits = packingScore(node, resources, requirements.Memory)
+			if !fits {
+				poolsFull = true
 
-		if score < bestScore {
+				continue
+			}
+		} else {
+			score = b.Score(node, resources, config)
+		}
+
+		if score < bestScore || (requirements.ResourceAdmission && score == bestScore && bestNode != nil && node.ID < bestNode.ID) {
 			bestNode = node
 			bestScore = score
 		}
