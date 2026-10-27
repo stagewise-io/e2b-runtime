@@ -55,7 +55,7 @@ type (
 )
 
 type SandboxObserver struct {
-	meterExporter  sdkmetric.Exporter
+	meterProvider  *sdkmetric.MeterProvider
 	registration   metric.Registration
 	exportInterval time.Duration
 
@@ -86,9 +86,15 @@ func NewSandboxObserver(ctx context.Context, nodeID, serviceName, serviceCommit,
 		return metricdata.CumulativeTemporality
 	})
 
-	externalMeterExporter, err := telemetry.NewMeterExporter(ctx, deltaTemporality)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create external meter exporter: %w", err)
+	// Keep polling for local OOM and usage warnings without creating a network
+	// exporter when telemetry is disabled.
+	var externalMeterExporter sdkmetric.Exporter = discardSandboxMetricsExporter{}
+	if telemetry.OTELCollectorGRPCEndpoint() != "" {
+		var err error
+		externalMeterExporter, err = telemetry.NewMeterExporter(ctx, deltaTemporality)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create external meter exporter: %w", err)
+		}
 	}
 
 	res, err := telemetry.GetResource(ctx, nodeID, serviceName, serviceCommit, serviceVersion, serviceInstanceID)
@@ -106,6 +112,15 @@ func NewSandboxObserver(ctx context.Context, nodeID, serviceName, serviceCommit,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create external metric provider: %w", err)
 	}
+
+	initialized := false
+	defer func() {
+		if !initialized {
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), meterExporterShutdownTimeout)
+			defer cancel()
+			_ = meterProvider.Shutdown(shutdownCtx)
+		}
+	}()
 
 	meter := meterProvider.Meter("github.com/e2b-dev/infra/packages/orchestrator/pkg/metrics")
 	cpuTotal, err := telemetry.GetGaugeInt(meter, telemetry.SandboxCpuTotalGaugeName)
@@ -165,7 +180,7 @@ func NewSandboxObserver(ctx context.Context, nodeID, serviceName, serviceCommit,
 
 	so := &SandboxObserver{
 		exportInterval: sandboxMetricExportPeriod,
-		meterExporter:  externalMeterExporter,
+		meterProvider:  meterProvider,
 		sandboxes:      sandboxes,
 		meter:          meter,
 		cpuTotal:       cpuTotal,
@@ -188,6 +203,7 @@ func NewSandboxObserver(ctx context.Context, nodeID, serviceName, serviceCommit,
 
 	// Register the callback to start observing sandbox metrics
 	so.registration = registration
+	initialized = true
 
 	return so, nil
 }
@@ -349,10 +365,30 @@ func (so *SandboxObserver) startObserving() (metric.Registration, error) {
 	return unregister, nil
 }
 
+// Drop only the export, not the aggregation: the SDK must still run the
+// observer callback that checks sandbox health and emits local warnings.
+type discardSandboxMetricsExporter struct{}
+
+func (discardSandboxMetricsExporter) Temporality(sdkmetric.InstrumentKind) metricdata.Temporality {
+	return metricdata.CumulativeTemporality
+}
+
+func (discardSandboxMetricsExporter) Aggregation(kind sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return sdkmetric.DefaultAggregationSelector(kind)
+}
+
+func (discardSandboxMetricsExporter) Export(context.Context, *metricdata.ResourceMetrics) error {
+	return nil
+}
+
+func (discardSandboxMetricsExporter) ForceFlush(context.Context) error { return nil }
+
+func (discardSandboxMetricsExporter) Shutdown(context.Context) error { return nil }
+
 const meterExporterShutdownTimeout = 10 * time.Second
 
 func (so *SandboxObserver) Close(ctx context.Context) error {
-	if so.meterExporter == nil {
+	if so.meterProvider == nil {
 		return nil
 	}
 
@@ -364,11 +400,12 @@ func (so *SandboxObserver) Close(ctx context.Context) error {
 		}
 	}
 
-	// Use a timeout to prevent hanging on meter exporter shutdown
+	// The provider owns the periodic reader. Stop it before the exporter so an
+	// in-flight collection cannot keep exporting during shutdown.
 	shutdownCtx, cancel := context.WithTimeout(ctx, meterExporterShutdownTimeout)
 	defer cancel()
 
-	if err := so.meterExporter.Shutdown(shutdownCtx); err != nil {
+	if err := so.meterProvider.Shutdown(shutdownCtx); err != nil {
 		errs = append(errs, fmt.Errorf("failed to shutdown sandbox observer meter provider: %w", err))
 	}
 

@@ -323,6 +323,12 @@ server shutdown with a separate deadline, then forces server closure if needed. 
 closure recovers graceful deadline expiry; other server errors still propagate. Pprof stays
 available through service teardown; its final shutdown also has a deadline and forced-close fallback.
 
+The sandbox metrics observer polls for local OOM and usage warnings even when
+`OTEL_COLLECTOR_GRPC_ENDPOINT` is unset. Without that endpoint it discards exports locally
+instead of starting an OTLP connection. Shutdown unregisters its sandbox callback and closes
+the owning meter provider, which stops the periodic reader before closing its exporter.
+Collector shutdown failures still propagate; they do not weaken supervised clean-exit checks.
+
 `InfoService.ServiceInfo` reports `outstanding_work` for sandbox, template-builder, and
 mixed-role nodes. It counts overlapping work holds, not distinct sandboxes or builds, and includes
 tracked background persistence and cleanup. The producer reports zero when idle. The API caches
