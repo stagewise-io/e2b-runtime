@@ -10,6 +10,8 @@ on:
       - packages/shared/**
       - packages/clickhouse/**
       - .github/workflows/klex-publish-orchestrator.yml
+      - scripts/select-runtime-source.sh
+      - scripts/test_runtime_bundle_source.py
   push:
     branches:
       - klex/main
@@ -18,6 +20,8 @@ on:
       - packages/shared/**
       - packages/clickhouse/**
       - .github/workflows/klex-publish-orchestrator.yml
+      - scripts/select-runtime-source.sh
+      - scripts/test_runtime_bundle_source.py
   workflow_dispatch:
     inputs:
       environment:
@@ -27,6 +31,11 @@ on:
           - preview
           - production
         default: preview
+      source_commit:
+        description: Optional full merged runtime commit to rebuild, dispatched from klex/main
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -36,18 +45,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s scripts -p test_runtime_bundle_source.py
+
   build:
     name: Build and verify host binaries
+    needs: contracts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      commit: ${{ steps.meta.outputs.commit }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Select immutable runtime source
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_COMMIT: ${{ github.sha }}
+        run: bash scripts/select-runtime-source.sh
 
       - name: Resolve build metadata
         id: meta
@@ -60,6 +89,7 @@ jobs:
             # Build metadata preserves the base version's feature-gate ordering.
             echo "version=$base_version+klex.$commit_sha"
             echo "tag=klex-$commit_sha"
+            echo "commit=$(git rev-parse HEAD)"
           } >>"$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
@@ -74,14 +104,14 @@ jobs:
           platforms: linux/amd64
           outputs: type=local,dest=release
           build-args: |
-            COMMIT_SHA=${{ github.sha }}
+            COMMIT_SHA=${{ steps.meta.outputs.commit }}
             VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=klex-orchestrator
           cache-to: type=gha,mode=max,scope=klex-orchestrator
 
       - name: Verify bundle metadata and checksums
         env:
-          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_COMMIT: ${{ steps.meta.outputs.commit }}
           EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
@@ -95,7 +125,7 @@ jobs:
   publish:
     name: Publish orchestrator (${{ inputs.environment || 'preview' }})
     needs: build
-    if: github.event_name != 'pull_request' && github.repository == 'stagewise-io/e2b-runtime'
+    if: github.event_name != 'pull_request' && github.repository == 'stagewise-io/e2b-runtime' && github.ref == 'refs/heads/klex/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ${{ inputs.environment || 'preview' }}
@@ -107,6 +137,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.build.outputs.commit }}
 
       - name: Resolve artifact repository
         id: repository
@@ -163,7 +194,7 @@ jobs:
           push: true
           tags: ${{ steps.repository.outputs.url }}:${{ needs.build.outputs.tag }}
           build-args: |
-            COMMIT_SHA=${{ github.sha }}
+            COMMIT_SHA=${{ needs.build.outputs.commit }}
             VERSION=${{ needs.build.outputs.version }}
           cache-from: type=gha,scope=klex-orchestrator
           cache-to: type=gha,mode=max,scope=klex-orchestrator
@@ -173,7 +204,7 @@ jobs:
           IMAGE: ${{ steps.repository.outputs.url }}:${{ needs.build.outputs.tag }}
           DIGEST: ${{ steps.push.outputs.digest || steps.existing.outputs.digest }}
           VERSION: ${{ needs.build.outputs.version }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ needs.build.outputs.commit }}
           REUSED: ${{ steps.existing.outputs.exists }}
         run: |
           {
